@@ -37,9 +37,10 @@ cores="$(sysctl -n hw.ncpu)"
 load_pids=()
 sampler_pid=""
 
-# One status read → "hottest_core_temp rpm"
+# One status read → "hottest_core_temp rpm". Killed after 5 s so a stuck SMC read
+# shows up as a sampling gap instead of stalling the run (macOS has no `timeout`).
 sample() {
-    "$TF" status 2>/dev/null | awk '
+    perl -e 'alarm shift; exec @ARGV' 5 "$TF" status 2>/dev/null | awk '
         /"T[CpGg][^"]*" *:/ { v = $NF + 0; if (v > t) t = v }
         /"actual_rpm" *:/ && rpm == "" { gsub(/,/, "", $NF); rpm = $NF }
         END { if (t > 0 && rpm != "") printf "%.1f %s\n", t, rpm }'
@@ -58,6 +59,10 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 [ -n "$(sample)" ] || { echo "Can't read sensors with '$TF status'. Is ThermalForge installed?" >&2; exit 1; }
+
+# CPU load doesn't prevent idle sleep; a mid-run sleep freezes both the app and sampling.
+# caffeinate exits on its own when this script does.
+caffeinate -i -w $$ &
 
 # Start from a comparable state: wait (bounded) for the hottest core to cool
 echo "Waiting up to ${START_WAIT_SEC}s for the hottest core to drop below ${START_BELOW}°C..."
@@ -137,9 +142,25 @@ events=$(ls -1 "$LOG_DIR"/thermalforge-*.log 2>/dev/null | tail -2 | xargs cat 2
     awk -F'[][]' -v s="$start_iso" -v e="$end_iso" '$2 >= s && $2 <= e' |
     awk '{ l = tolower($0) } l ~ /fans on:/ { on++ } l ~ /fans off:/ { off++ } END { printf "%d %d", on, off }')
 
+# Profiles the app actually ran, from its trigger and anomaly log lines
+profiles_seen=$(ls -1 "$LOG_DIR"/thermalforge-*.log 2>/dev/null | tail -2 | xargs cat 2>/dev/null |
+    awk -F'[][]' -v s="$start_iso" -v e="$end_iso" '$2 >= s && $2 <= e' |
+    sed -n -E 's/.*\| Profile: (.*)$/\1/p; s/.*Sustained trigger: .* \[(.*)\]$/\1/p' | sort -u | paste -sd, - | sed 's/,/, /g')
+
+# A long gap or early end means sampling stalled (Mac asleep, hung sensor reads), so the
+# phases no longer compare. A single slow read leaves a gap of ~6 s, which is fine.
+gaps=$(awk -F, -v total="$total" '
+    NR > 2 && $1 - prev > 15 { printf "%s%ss→%ss", (n++ ? ", " : ""), prev, $1 }
+    NR > 1 { prev = $1 }
+    END { if (prev < total - 15) printf "%sended at %ss of %ss", (n ? ", " : ""), prev + 0, total }' "$csv")
+
 echo
 echo "Burst test \"$label\" — $start_iso to $end_iso"
+echo "Profile(s) the app ran: ${profiles_seen:-unknown (no profile lines logged)}"
 echo "Samples: $csv"
+if [ -n "$gaps" ]; then
+    echo "INVALID: sampling gaps at $gaps (Mac asleep or sensor reads stalled). Don't compare this run."
+fi
 # Surge: RPM rises ≥1000 above the lowest RPM of the previous 10 samples; re-arms once back within 500.
 awk -F, -v events="$events" '
     NR == 1 { next }
