@@ -346,10 +346,12 @@ final class AppState: ObservableObject {
         guard let fc = try? FanControl() else { return }
 
         let monitor = ThermalMonitor(fanControl: fc, profile: activeProfile)
-        monitor.onUpdate = { [weak self] status, profile, state in
+        // activeProfile is NOT taken from the monitor: only AppState changes it (via
+        // switchProfile), and the monitor applies that asynchronously, so an update still
+        // carrying the previous profile could land after a click and revert the selection.
+        monitor.onUpdate = { [weak self] status, _, state in
             Task { @MainActor [weak self] in
                 self?.latestStatus = status
-                self?.activeProfile = profile
                 self?.monitorState = state
                 // Max of only the displayed sensors
                 // Peak across all CPU and GPU sensors for menu bar display
