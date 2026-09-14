@@ -13,6 +13,9 @@ import SwiftUI
 final class AppState: ObservableObject {
     @Published var latestStatus: ThermalStatus?
     @Published var activeProfile: FanProfile = .silent
+    /// Profiles offered in the picker: built-ins plus valid saved custom profiles. Read once
+    /// at launch, so adding or editing a profile file takes effect after relaunching the app.
+    let availableProfiles = FanProfile.loadAll()
     @Published var monitorState: MonitorState = .idle
     @Published var maxTemp: Float?
     @Published var useFahrenheit: Bool = UserDefaults.standard.bool(forKey: "useFahrenheit") {
@@ -436,7 +439,7 @@ final class AppState: ObservableObject {
         // a CLI hold (so its unsupervised hold isn't orphaned). Otherwise active
         // profiles let tick() ramp from the current temperature. Off-main one-shot
         // on the pump (never coalesced/reordered).
-        if profile.curve.handsOff || profile.id == "smart" || profile.id == "silent" || took {
+        if profile.curve.handsOff || profile.curve.adaptive != nil || profile.id == "silent" || took {
             commandPump.submit(.resetAuto)
         }
     }
@@ -456,7 +459,8 @@ final class AppState: ObservableObject {
     /// The profile to restore at launch: the persisted choice resolved against the known
     /// profiles, or Silent when nothing is saved or the id no longer exists.
     private func restoredProfile() -> FanProfile {
-        FanProfile.selectable(id: UserDefaults.standard.string(forKey: Self.selectedProfileKey))
+        FanProfile.selectable(id: UserDefaults.standard.string(forKey: Self.selectedProfileKey),
+                              among: availableProfiles)
     }
 
     // MARK: - Daemon recovery

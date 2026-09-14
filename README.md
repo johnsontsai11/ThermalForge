@@ -76,6 +76,17 @@ Thermal polling runs at 100ms (matching Apple's own thermalmonitord cadence) for
 - **At ceiling and above:** Fan speed at the profile's maximum (60%/85%/100%).
 - **Ramp down:** Each profile has its own ramp-down rate. Max uses a gentle governor to let temps stabilize before backing off.
 
+### Custom profiles
+
+Put a profile JSON file in `~/Library/Application Support/ThermalForge/profiles/` and relaunch the app; it appears in the profile picker. Every `curve` field is required: `stopTemp`, `startTemp`, `ceilingTemp`, `maxRPMPercent` (0–1), `handsOff`, `alwaysOn`, `curveShape` (`linear`, `easeIn`, `easeOut`, `sCurve`), `rampUpPerSec`, `rampDownPerSec`, `sustainedTriggerSec`, `instantEngage`.
+
+Add an optional `adaptive` block to get Smart's behavior with your own tuning:
+- `smoothingSec` (0–60): the profile reacts to the average of the hottest core over this window instead of each raw reading, so brief spikes don't rev the fans. The 95°C safety override always uses raw readings.
+- `rateBoost` (0–1): extra fan speed per °C/sec of temperature rise (built-in Smart: 0.2).
+- `useCalibration`: use calibration data when it exists (built-in Smart: `true`).
+
+Files with inconsistent values (e.g. `stopTemp` above `startTemp`) or the reserved id `smart` are skipped and logged. `Scripts/burst-test.sh <label>` runs a repeatable 10-minute load and summarizes temperature, RPM and fan surges, for comparing profiles.
+
 ## Install
 
 ### Option A: Homebrew (recommended)

@@ -29,6 +29,16 @@ public enum CurveShape: String, Codable, Equatable {
     case easeOut
     /// pos²(3-2pos) * max — smooth at both ends
     case sCurve
+
+    /// Map a position in the proportional zone (0.0–1.0) to a shaped fraction (0.0–1.0).
+    public func apply(_ position: Float) -> Float {
+        switch self {
+        case .linear: return position
+        case .easeIn: return position * position
+        case .easeOut: return sqrt(position)
+        case .sCurve: return position * position * (3 - 2 * position)
+        }
+    }
 }
 
 // MARK: - Profile Model
@@ -78,11 +88,33 @@ public struct FanProfile: Codable, Identifiable, Equatable {
         /// Ramp-down governor still applies for smooth deceleration.
         public let instantEngage: Bool
 
+        /// If set, the profile runs Smart's adaptive logic (rate-of-change boost, optional
+        /// calibration, smoothed control temperature) instead of the plain curve.
+        /// Optional so saved profiles without it still decode.
+        public let adaptive: Adaptive?
+
+        /// Tuning for Smart-style adaptive profiles.
+        public struct Adaptive: Codable, Equatable {
+            /// Seconds of peak-temperature history averaged into the control temperature.
+            /// 0 reacts to each raw reading. The 95°C safety override always uses raw readings.
+            public let smoothingSec: Float
+            /// Fan fraction added per °C/sec of temperature rise.
+            public let rateBoost: Float
+            /// Use the machine calibration table (if one exists) instead of the curve.
+            public let useCalibration: Bool
+
+            public init(smoothingSec: Float = 0, rateBoost: Float = 0.2, useCalibration: Bool = true) {
+                self.smoothingSec = smoothingSec
+                self.rateBoost = rateBoost
+                self.useCalibration = useCalibration
+            }
+        }
+
         public init(stopTemp: Float = 50, startTemp: Float = 55, ceilingTemp: Float = 70,
                     maxRPMPercent: Float = 0.6, handsOff: Bool = false, alwaysOn: Bool = false,
                     curveShape: CurveShape = .linear, rampUpPerSec: Float = 0.05,
                     rampDownPerSec: Float = 0.025, sustainedTriggerSec: Float = 8,
-                    instantEngage: Bool = false) {
+                    instantEngage: Bool = false, adaptive: Adaptive? = nil) {
             self.stopTemp = stopTemp
             self.startTemp = startTemp
             self.ceilingTemp = ceilingTemp
@@ -94,6 +126,7 @@ public struct FanProfile: Codable, Identifiable, Equatable {
             self.rampDownPerSec = rampDownPerSec
             self.sustainedTriggerSec = sustainedTriggerSec
             self.instantEngage = instantEngage
+            self.adaptive = adaptive
         }
 
         /// Calculate the target fan speed percentage (0.0–1.0) for a given temperature.
@@ -125,21 +158,39 @@ public struct FanProfile: Codable, Identifiable, Equatable {
                 if instantEngage { return maxRPMPercent }
 
                 let position = (temp - startTemp) / (ceilingTemp - startTemp)
-                let shaped: Float
-                switch curveShape {
-                case .linear:
-                    shaped = position
-                case .easeIn:
-                    shaped = position * position
-                case .easeOut:
-                    shaped = sqrt(position)
-                case .sCurve:
-                    shaped = position * position * (3 - 2 * position)
-                }
-                return shaped * maxRPMPercent
+                return curveShape.apply(position) * maxRPMPercent
             }
 
             return nil
+        }
+
+        /// Adaptive (Smart-style) target fan fraction for a control temperature, before the
+        /// fan's minimum-RPM floor and ramp governors are applied by the monitor.
+        /// `rate` is the temperature rise in °C/sec; `calibration` is ignored unless the
+        /// profile's `adaptive.useCalibration` is true.
+        public func adaptiveTargetPercent(at temp: Float, rate: Float,
+                                          calibration: CalibrationData?) -> Float {
+            let settings = adaptive ?? Adaptive()
+            let range = ceilingTemp - startTemp
+            let position = range > 0 ? Swift.min(Swift.max((temp - startTemp) / range, 0), 1) : 1
+            var target: Float
+
+            if settings.useCalibration, let cal = calibration, let calPct = cal.fanPercentForTemp(temp) {
+                // Calibrated: machine-specific temp→fan lookup. Boost scales with proximity
+                // to the ceiling (0.75 × rateBoost keeps built-in Smart at its original 0.15).
+                target = calPct
+                if rate > 0 {
+                    target = min(target + rate * settings.rateBoost * 0.75 * (1 + position), maxRPMPercent)
+                }
+            } else {
+                target = curveShape.apply(position) * maxRPMPercent
+                if rate > 0 {
+                    target = min(target + rate * settings.rateBoost, maxRPMPercent)
+                }
+            }
+
+            if temp > ceilingTemp { target = maxRPMPercent }
+            return Swift.min(Swift.max(target, 0), maxRPMPercent)
         }
     }
 
@@ -220,18 +271,20 @@ extension FanProfile {
         curve: Curve(stopTemp: 50, startTemp: 53, ceilingTemp: 85,
                      maxRPMPercent: 1.0, curveShape: .sCurve,
                      rampUpPerSec: 0.05, rampDownPerSec: 0.025,
-                     sustainedTriggerSec: 6)
+                     sustainedTriggerSec: 6,
+                     adaptive: Curve.Adaptive(smoothingSec: 0, rateBoost: 0.2, useCalibration: true))
     )
 
     public static let builtIn: [FanProfile] = [silent, balanced, performance, max]
 
-    /// Resolve a persisted profile id to a known profile for launch restore. Searches the
-    /// built-ins plus Smart (which is surfaced via its own button, so it isn't in
-    /// `builtIn`). Returns Silent when the id is nil (nothing saved) or unrecognized (a
-    /// profile removed or renamed in a later version), so a stale saved id never crashes.
-    public static func selectable(id: String?) -> FanProfile {
+    /// Resolve a persisted profile id to a known profile for launch restore. Searches
+    /// `profiles` (built-ins plus saved custom profiles by default) plus Smart (which is
+    /// surfaced via its own button, so it isn't in `builtIn`). Returns Silent when the id
+    /// is nil (nothing saved) or unrecognized (a profile removed, renamed, or a custom
+    /// file deleted), so a stale saved id never crashes.
+    public static func selectable(id: String?, among profiles: [FanProfile] = loadAll()) -> FanProfile {
         guard let id else { return .silent }
-        return (builtIn + [smart]).first { $0.id == id } ?? .silent
+        return (profiles + [smart]).first { $0.id == id } ?? .silent
     }
 }
 
@@ -263,6 +316,10 @@ extension FanProfile {
             if let data = try? Data(contentsOf: file),
                let profile = try? JSONDecoder().decode(FanProfile.self, from: data)
             {
+                if let error = profile.validationError {
+                    TFLogger.shared.error("Skipped profile \(file.lastPathComponent): \(error)")
+                    continue
+                }
                 if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
                     profiles[idx] = profile
                 } else {
@@ -271,6 +328,22 @@ extension FanProfile {
             }
         }
         return profiles
+    }
+
+    /// Why a saved profile can't be used, or nil if it's sane.
+    public var validationError: String? {
+        let c = curve
+        if id == FanProfile.smart.id { return "id \"smart\" is reserved for the built-in Smart profile" }
+        if c.stopTemp > c.startTemp { return "stopTemp \(c.stopTemp) is above startTemp \(c.startTemp)" }
+        if c.startTemp > c.ceilingTemp { return "startTemp \(c.startTemp) is above ceilingTemp \(c.ceilingTemp)" }
+        if !(0...1).contains(c.maxRPMPercent) { return "maxRPMPercent \(c.maxRPMPercent) is outside 0–1" }
+        if c.rampUpPerSec <= 0 || c.rampDownPerSec <= 0 { return "ramp rates must be above 0" }
+        if c.sustainedTriggerSec < 0 { return "sustainedTriggerSec must not be negative" }
+        if let a = c.adaptive {
+            if !(0...60).contains(a.smoothingSec) { return "smoothingSec \(a.smoothingSec) is outside 0–60" }
+            if !(0...1).contains(a.rateBoost) { return "rateBoost \(a.rateBoost) is outside 0–1" }
+        }
+        return nil
     }
 }
 

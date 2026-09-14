@@ -45,6 +45,31 @@ public enum MonitorState: Equatable {
     case safetyOverride
 }
 
+// MARK: - Rolling Average
+
+/// Mean of the most recent `capacity` samples. Used to smooth the control temperature
+/// for adaptive profiles so brief per-core spikes don't drive the fans.
+struct RollingAverage {
+    let capacity: Int
+    private var samples: [Float] = []
+    private var next = 0
+
+    init(capacity: Int) {
+        self.capacity = max(capacity, 1)
+    }
+
+    /// Add a sample and return the mean of the retained window.
+    mutating func add(_ value: Float) -> Float {
+        if samples.count < capacity {
+            samples.append(value)
+        } else {
+            samples[next] = value
+            next = (next + 1) % capacity
+        }
+        return samples.reduce(0, +) / Float(samples.count)
+    }
+}
+
 // MARK: - Thermal Monitor
 
 public final class ThermalMonitor {
@@ -80,6 +105,8 @@ public final class ThermalMonitor {
     // MARK: - Smart Profile State
 
     private var tempHistory: [Float] = []
+    /// Smoothed control temperature for adaptive profiles with `smoothingSec > 0`.
+    private var controlTempAverage: RollingAverage?
 
     // MARK: - Anomaly Detection
 
@@ -116,6 +143,13 @@ public final class ThermalMonitor {
         self.fanControl = fanControl
         self.activeProfile = profile
         self.tickInterval = 0.1
+        self.controlTempAverage = makeControlTempAverage(for: profile)
+    }
+
+    /// A rolling average sized to the profile's smoothing window, or nil for raw readings.
+    private func makeControlTempAverage(for profile: FanProfile) -> RollingAverage? {
+        guard let seconds = profile.curve.adaptive?.smoothingSec, seconds > tickInterval else { return nil }
+        return RollingAverage(capacity: Int((seconds / tickInterval).rounded()))
     }
 
     // MARK: - Lifecycle
@@ -145,9 +179,10 @@ public final class ThermalMonitor {
             fansCurrentlyRunning = false
             sustainedAboveCount = 0
             tickCounter = 0
+            controlTempAverage = makeControlTempAverage(for: profile)
 
-            if profile.id == "smart" {
-                // Reset Smart state and reload calibration data
+            if profile.curve.adaptive != nil {
+                // Reset adaptive state and reload calibration data
                 tempHistory.removeAll()
                 let loaded = CalibrationData.load()
                 if let error = loaded?.validationError {
@@ -171,6 +206,10 @@ public final class ThermalMonitor {
         // Peak CPU (TC/Tp) + GPU (TG/Tg) — the shared safety-floor sensor extraction,
         // so the client monitor and the daemon's floor read the identical value.
         let maxTemp = status.safetyPeakTemp
+
+        // Control temperature: smoothed for adaptive profiles that ask for it, raw otherwise.
+        // Updated every tick (even during a safety override) so the window stays continuous.
+        let controlTemp = controlTempAverage?.add(maxTemp) ?? maxTemp
 
         // Monitor cadence: process capture + anomaly detection (every 2 seconds)
         if tickCounter % Self.monitorCadence == 0 {
@@ -203,17 +242,17 @@ public final class ThermalMonitor {
         // Sustained trigger: track consecutive ticks above start threshold.
         // Per-profile duration — converted to tick count at runtime.
         let startThreshold = activeProfile.curve.startTemp
-        if maxTemp >= startThreshold {
+        if controlTemp >= startThreshold {
             sustainedAboveCount += 1
         } else {
             sustainedAboveCount = 0
         }
 
         // Profile-specific logic
-        if activeProfile.id == "smart" {
-            tickSmart(status: status, peakTemp: maxTemp)
+        if activeProfile.curve.adaptive != nil {
+            tickSmart(status: status, peakTemp: controlTemp)
         } else {
-            tickCurve(status: status, peakTemp: maxTemp)
+            tickCurve(status: status, peakTemp: controlTemp)
         }
 
         // UI update at slower cadence (every 500ms)
@@ -288,17 +327,15 @@ public final class ThermalMonitor {
         if anomalyHistory.count > 15 { anomalyHistory.removeFirst() }
     }
 
-    // MARK: - Smart Profile
+    // MARK: - Adaptive (Smart-style) Profiles
 
-    /// Target temperature ceiling — keep below this to avoid any throttling
-    private static let smartCeiling: Float = 85.0
-    /// Smart starts earlier than other profiles to get ahead of rising temps
-    private static let smartFloor: Float = 53.0
-
-    /// All profiles share the same off threshold — 50°C matches Apple's observed stop range
-    private static let smartStopTemp: Float = 50.0
-
+    /// Smart's logic, driven by the active profile's curve and `adaptive` settings.
+    /// Built-in Smart: stop 50°C, start 53°C, ceiling 85°C, 100% cap, S-curve, boost 0.2.
+    /// `peakTemp` is the control temperature (smoothed when the profile asks for it).
     private func tickSmart(status: ThermalStatus, peakTemp: Float) {
+        let curve = activeProfile.curve
+        let name = activeProfile.name
+
         // Sample temperature history at monitor cadence (2s) for stable rate-of-change
         if tickCounter % Self.monitorCadence == 0 {
             tempHistory.append(peakTemp)
@@ -310,70 +347,40 @@ public final class ThermalMonitor {
         let minPct = minRPM / maxRPM
 
         // Below stop threshold and fans running: turn off (with hysteresis)
-        if peakTemp < Self.smartStopTemp && fansCurrentlyRunning && rateOfChange() <= 0 {
+        if peakTemp < curve.stopTemp && fansCurrentlyRunning && rateOfChange() <= 0 {
             applyCommand(.resetAuto)
             lastAppliedRPMPercent = 0
             fansCurrentlyRunning = false
             state = .idle
-            TFLogger.shared.fan("Smart fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(Self.smartStopTemp))°C")
+            TFLogger.shared.fan("\(name) fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(curve.stopTemp))°C")
             return
         }
 
-        // Below floor and fans not running: stay off
-        if peakTemp < Self.smartFloor && !fansCurrentlyRunning {
-            return
-        }
-
-        // In hysteresis band (50-53°C): maintain current state
-        if peakTemp >= Self.smartStopTemp && peakTemp < Self.smartFloor && !fansCurrentlyRunning {
+        // Below start and fans not running: stay off (covers the stop–start hysteresis band)
+        if peakTemp < curve.startTemp && !fansCurrentlyRunning {
             return
         }
 
         // Sustained trigger: per-profile duration
-        let sustainedTicksNeeded = Int(activeProfile.curve.sustainedTriggerSec / tickInterval)
+        let sustainedTicksNeeded = Int(curve.sustainedTriggerSec / tickInterval)
         if !fansCurrentlyRunning && sustainedAboveCount < sustainedTicksNeeded {
             if sustainedAboveCount == 1 {
-                TFLogger.shared.fan("Sustained trigger: \(String(format: "%.1f", peakTemp))°C — waiting (\(sustainedAboveCount)/\(sustainedTicksNeeded)) [Smart]")
+                TFLogger.shared.fan("Sustained trigger: \(String(format: "%.1f", peakTemp))°C — waiting (\(sustainedAboveCount)/\(sustainedTicksNeeded)) [\(name)]")
             }
             return
         }
 
-        let rate = rateOfChange()
-        var targetPct: Float
+        var targetPct = curve.adaptiveTargetPercent(at: peakTemp, rate: rateOfChange(),
+                                                    calibration: calibration)
 
-        if let cal = calibration, let calPct = cal.fanPercentForTemp(peakTemp) {
-            // Calibrated: use machine-specific temp→fan lookup
-            targetPct = calPct
-
-            if rate > 0 {
-                // Rising: boost proportionally to rate and proximity to ceiling
-                let urgency = min(max((peakTemp - Self.smartFloor) / (Self.smartCeiling - Self.smartFloor), 0), 1)
-                targetPct = min(targetPct + rate * 0.15 * (1 + urgency), 1.0)
-            }
-        } else {
-            // Uncalibrated: S-curve (matches profile curveShape)
-            let range = Self.smartCeiling - Self.smartFloor
-            let position = min(max((peakTemp - Self.smartFloor) / range, 0), 1)
-            targetPct = position * position * (3 - 2 * position)
-
-            if rate > 0 {
-                targetPct = min(targetPct + rate * 0.2, 1.0)
-            }
-        }
-
-        if peakTemp > Self.smartCeiling {
-            targetPct = 1.0
-        }
-
-        // Clamp to valid range, enforce minimum RPM
-        targetPct = min(max(targetPct, 0), 1.0)
+        // Enforce minimum RPM
         if targetPct > 0 && targetPct < minPct {
             targetPct = minPct
         }
 
         // Ramp governors — per-profile rates, per-tick amounts
-        let rampUp = activeProfile.curve.rampUpPerSec * tickInterval
-        let rampDown = activeProfile.curve.rampDownPerSec * tickInterval
+        let rampUp = curve.rampUpPerSec * tickInterval
+        let rampDown = curve.rampDownPerSec * tickInterval
 
         if targetPct > lastAppliedRPMPercent {
             targetPct = min(targetPct, lastAppliedRPMPercent + rampUp)
@@ -387,14 +394,14 @@ public final class ThermalMonitor {
             applyCommand(.setRPM(targetRPM))
 
             if !fansCurrentlyRunning {
-                TFLogger.shared.fan("Smart fans on: \(Int(targetRPM)) RPM at \(String(format: "%.1f", peakTemp))°C")
+                TFLogger.shared.fan("\(name) fans on: \(Int(targetRPM)) RPM at \(String(format: "%.1f", peakTemp))°C")
             }
 
             lastAppliedRPMPercent = targetPct
             fansCurrentlyRunning = true
-            state = .active(profileName: "Smart")
+            state = .active(profileName: name)
         } else if fansCurrentlyRunning {
-            state = .active(profileName: "Smart")
+            state = .active(profileName: name)
         }
     }
 
