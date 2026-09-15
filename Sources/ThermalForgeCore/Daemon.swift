@@ -272,6 +272,9 @@ public final class DaemonServer {
     private let rateLock = NSLock()
     /// The thermal safety floor's decision logic (thresholds mirrored from FanProfile).
     private let thermalFloor = ThermalFloor()
+    /// Whether the sampled peak has stayed over the floor's threshold long enough to engage.
+    /// Touched only by the thermal floor loop.
+    private var safetyHeat = SustainedHeat()
     /// A temperature sampler injected by tests. When nil, the floor reads the SMC
     /// safety keys itself — per key under smcLock — so it unit-tests via ThermalFloor
     /// and runs without head-of-line blocking in production.
@@ -556,8 +559,9 @@ public final class DaemonServer {
         guard suspended || heldCommand != nil else { return }
 
         guard let temp = currentSafetyTemp() else { return }
+        let sustained = safetyHeat.update(hot: temp >= thermalFloor.threshold, now: Date())
 
-        switch thermalFloor.evaluate(temp: temp, holdCommand: heldCommand, suspended: suspended) {
+        switch thermalFloor.evaluate(temp: temp, sustained: sustained, holdCommand: heldCommand, suspended: suspended) {
         case .none:
             return
 

@@ -132,9 +132,16 @@ struct ProfileTests {
     func safetyOverrideSkipsHandsOff() {
         // Mac mini M4 under a compile: Tp0W alone read 95.7°C (next sensor 90.0°C), and
         // Silent set the fan to manual 4900 RPM, then straight back to auto.
-        #expect(!FanProfile.silent.safetyOverrideEngages(at: 95.7))
-        #expect(FanProfile.smart.safetyOverrideEngages(at: 95.7))
-        #expect(!FanProfile.smart.safetyOverrideEngages(at: 94.9))
+        #expect(!FanProfile.silent.safetyOverrideEngages(at: 95.7, sustained: true))
+        #expect(FanProfile.smart.safetyOverrideEngages(at: 95.7, sustained: true))
+        #expect(!FanProfile.smart.safetyOverrideEngages(at: 94.9, sustained: true))
+    }
+
+    @Test("Smart waits for sustained heat; other controlling profiles act on the raw reading")
+    func safetyOverrideSustainedForSmart() {
+        // A 1–2 s Tp0W jump is hot but not sustained: Smart ignores it, Balanced doesn't.
+        #expect(!FanProfile.smart.safetyOverrideEngages(at: 95.7, sustained: false))
+        #expect(FanProfile.balanced.safetyOverrideEngages(at: 95.7, sustained: false))
     }
 
     @Test("Hysteresis deadband is 5°C")

@@ -58,18 +58,43 @@ public struct ThermalFloor {
         case restore   // cooled below the hysteresis point → restore the hold (or auto)
     }
 
+    /// - sustained: has `temp` stayed at/above the threshold for `FanProfile.safetySustainSec`?
     /// - suspended: is the floor currently overriding fans to max?
     /// - holdCommand: the active hold's command string, or nil for auto / no hold.
-    public func evaluate(temp: Float, holdCommand: String?, suspended: Bool) -> Action {
+    public func evaluate(temp: Float, sustained: Bool, holdCommand: String?, suspended: Bool) -> Action {
         // A bogus post-wake reading must not look "cooled" and release the override.
         guard FanProfile.isPlausibleTemp(temp) else { return .none }
         if suspended {
             // Restore only once cooled past the hysteresis point; otherwise keep max.
             return temp < clearBelow ? .restore : .none
         }
-        // Engage only when overheating AND a hold pins fans below max. No hold (auto)
-        // or an already-max hold needs no override.
-        guard temp >= threshold, let cmd = holdCommand, cmd != "max" else { return .none }
+        // Engage only when overheating (sustained, so a brief sensor jump doesn't count)
+        // AND a hold pins fans below max. No hold (auto) or an already-max hold needs
+        // no override.
+        guard temp >= threshold, sustained, let cmd = holdCommand, cmd != "max" else { return .none }
         return .engage
+    }
+}
+
+/// Whether the peak has stayed at/above the safety threshold for `FanProfile.safetySustainSec`
+/// straight. On the Mac mini M4 under load, Tp0W alone jumps past 95°C for 1–2 SMC updates
+/// (~1 s each) while the other sensors stay ≤94°C; real overheating stays. The clock is
+/// injected, so the monitor (100ms ticks) and the daemon floor (1 s) share the rule.
+public struct SustainedHeat {
+    /// Readings further apart than this aren't continuous: a daemon that wasn't sampling
+    /// (no hold) or a run of failed reads restarts the count rather than bridging it.
+    static let maxSampleGap: TimeInterval = 2.5
+
+    private var hotSince: Date?
+    private var lastSample: Date?
+
+    public init() {}
+
+    public mutating func update(hot: Bool, now: Date) -> Bool {
+        let continuous = lastSample.map { now.timeIntervalSince($0) <= Self.maxSampleGap } ?? false
+        lastSample = now
+        guard hot else { hotSince = nil; return false }
+        if hotSince == nil || !continuous { hotSince = now }
+        return now.timeIntervalSince(hotSince ?? now) >= FanProfile.safetySustainSec
     }
 }

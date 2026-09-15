@@ -128,6 +128,8 @@ public final class ThermalMonitor {
     private var sustainedAboveCount = 0
     /// Consecutive ticks skipped for an implausible peak (see `FanProfile.isPlausibleTemp`).
     private var skippedReadings = 0
+    /// Whether the peak has stayed ≥95°C long enough for Smart profiles to override.
+    private var safetyHeat = SustainedHeat()
     /// When `fanControl.refreshMonitorKeys()` last ran; nil until the first tick.
     private var lastKeyRefresh: Date?
     static let keyRefreshInterval: TimeInterval = 60
@@ -282,8 +284,10 @@ public final class ThermalMonitor {
             monitorTick(status: status, anomalyTemp: anomalyTemp)
         }
 
-        // Safety override: any sensor > 95°C, unless the profile leaves fans to macOS
-        if activeProfile.safetyOverrideEngages(at: maxTemp) {
+        // Safety override: any sensor > 95°C, unless the profile leaves fans to macOS.
+        // Updated every tick, whatever the profile, so a profile switch keeps the window.
+        let sustainedHot = safetyHeat.update(hot: maxTemp >= FanProfile.safetyTempThreshold, now: now)
+        if activeProfile.safetyOverrideEngages(at: maxTemp, sustained: sustainedHot) {
             if state != .safetyOverride {
                 applyCommand(.setMax)
                 state = .safetyOverride

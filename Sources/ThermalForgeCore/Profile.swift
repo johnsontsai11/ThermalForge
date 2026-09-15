@@ -359,6 +359,9 @@ extension FanProfile {
     public static let safetyTempThreshold: Float = 95.0
     /// Hysteresis deadband to prevent oscillation
     public static let hysteresisDegrees: Float = 5.0
+    /// How long the peak must stay at/above the threshold before Smart profiles and the
+    /// daemon floor override. Measured Mac mini M4 Tp0W jumps last 1–2 s (max seen 2.1 s).
+    public static let safetySustainSec: TimeInterval = 3
     /// Lowest peak CPU/GPU temperature treated as a real reading. Just after wake the
     /// SMC reports a constant 7.3°C before its sensors are ready; a running chip
     /// indoors never reads this low.
@@ -371,9 +374,10 @@ extension FanProfile {
 
     /// Whether the monitor's safety override takes the fans to max at this peak.
     /// Hands-off profiles (Silent) never do: macOS owns the fans there, just as the
-    /// daemon's thermal floor leaves auto alone. On the Mac mini M4, Tp0W alone jumps past
+    /// daemon's thermal floor leaves auto alone. Smart (adaptive) profiles also need the
+    /// heat `sustained` (see `SustainedHeat`). On the Mac mini M4, Tp0W alone jumps past
     /// 95°C under load, which otherwise blasted the fan to max and straight back.
-    public func safetyOverrideEngages(at temp: Float) -> Bool {
-        !curve.handsOff && temp >= Self.safetyTempThreshold
+    public func safetyOverrideEngages(at temp: Float, sustained: Bool) -> Bool {
+        !curve.handsOff && temp >= Self.safetyTempThreshold && (curve.adaptive == nil || sustained)
     }
 }
