@@ -128,6 +128,15 @@ struct ProfileTests {
         #expect(FanProfile.safetyTempThreshold == 95.0)
     }
 
+    @Test("Silent never takes the fans on a hot reading; controlling profiles still do")
+    func safetyOverrideSkipsHandsOff() {
+        // Mac mini M4 under a compile: Tp0W alone read 95.7°C (next sensor 90.0°C), and
+        // Silent set the fan to manual 4900 RPM, then straight back to auto.
+        #expect(!FanProfile.silent.safetyOverrideEngages(at: 95.7))
+        #expect(FanProfile.smart.safetyOverrideEngages(at: 95.7))
+        #expect(!FanProfile.smart.safetyOverrideEngages(at: 94.9))
+    }
+
     @Test("Hysteresis deadband is 5°C")
     func hysteresis() {
         #expect(FanProfile.hysteresisDegrees == 5.0)

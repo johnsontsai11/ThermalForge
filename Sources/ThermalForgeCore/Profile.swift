@@ -355,7 +355,7 @@ extension FanProfile {
 // MARK: - Safety
 
 extension FanProfile {
-    /// Hard safety threshold — overrides any profile
+    /// Hard safety threshold — overrides any profile that controls the fans
     public static let safetyTempThreshold: Float = 95.0
     /// Hysteresis deadband to prevent oscillation
     public static let hysteresisDegrees: Float = 5.0
@@ -367,5 +367,13 @@ extension FanProfile {
     /// Whether a peak temperature can be trusted to drive fan decisions.
     public static func isPlausibleTemp(_ temp: Float) -> Bool {
         temp >= minPlausibleTemp
+    }
+
+    /// Whether the monitor's safety override takes the fans to max at this peak.
+    /// Hands-off profiles (Silent) never do: macOS owns the fans there, just as the
+    /// daemon's thermal floor leaves auto alone. On the Mac mini M4, Tp0W alone jumps past
+    /// 95°C under load, which otherwise blasted the fan to max and straight back.
+    public func safetyOverrideEngages(at temp: Float) -> Bool {
+        !curve.handsOff && temp >= Self.safetyTempThreshold
     }
 }

@@ -282,8 +282,8 @@ public final class ThermalMonitor {
             monitorTick(status: status, anomalyTemp: anomalyTemp)
         }
 
-        // Safety override: any sensor > 95°C
-        if maxTemp >= FanProfile.safetyTempThreshold {
+        // Safety override: any sensor > 95°C, unless the profile leaves fans to macOS
+        if activeProfile.safetyOverrideEngages(at: maxTemp) {
             if state != .safetyOverride {
                 applyCommand(.setMax)
                 state = .safetyOverride
