@@ -456,6 +456,18 @@ struct Calibrate: ParsableCommand {
         guard geteuid() == 0 else {
             throw ValidationError("Run with sudo: sudo thermalforge calibrate")
         }
+        // Calibration is saved in the sudo user's home for the app to read; a root shell
+        // has no such user and would save it to /var/root, where the app never looks.
+        guard CalibrationData.invokingUserID() != nil else {
+            throw ValidationError("""
+                Can't tell whose calibration this is: SUDO_UID isn't set.
+                Run it with sudo from your normal user account:
+
+                    sudo thermalforge calibrate
+
+                Don't run it from a root shell (su / sudo -i).
+                """)
+        }
 
         guard let calMode = CalibrationMode(rawValue: mode) else {
             throw ValidationError("Unknown mode '\(mode)'. Options: quick, standard, optimized")

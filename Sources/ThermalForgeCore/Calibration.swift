@@ -112,18 +112,45 @@ public struct CalibrationData: Codable {
 // MARK: - Persistence
 
 extension CalibrationData {
+    /// The user who ran `sudo`, when running as root through it; nil otherwise (not root,
+    /// or a root shell with no SUDO_UID). `calibrate` needs root for fan writes, but the
+    /// app reads calibration as that user — root's own home would be /var/root.
+    public static func invokingUserID(euid: uid_t = geteuid(),
+                                      environment: [String: String] = ProcessInfo.processInfo.environment) -> uid_t? {
+        guard euid == 0, let value = environment["SUDO_UID"], let uid = uid_t(value), uid != 0 else { return nil }
+        return uid
+    }
+
+    /// The invoking user's home under sudo, otherwise the current user's.
+    private static var userHome: URL {
+        if let uid = invokingUserID(), let entry = getpwuid(uid), let dir = entry.pointee.pw_dir {
+            return URL(fileURLWithPath: String(cString: dir), isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
     public static var filePath: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/calibration.json")
+        userHome.appendingPathComponent("Library/Application Support/ThermalForge/calibration.json")
+    }
+
+    /// Under sudo, give a file or folder root created back to the invoking user, so the app
+    /// can replace or delete it and `--reset` works without sudo. No-op when not under sudo.
+    static func handToInvokingUser(_ url: URL) throws {
+        guard let uid = invokingUserID() else { return }
+        guard let entry = getpwuid(uid), chown(url.path, uid, entry.pointee.pw_gid) == 0 else {
+            throw ThermalForgeError.writeFailed("chown \(url.path) to uid \(uid): errno \(errno)")
+        }
     }
 
     public func save() throws {
         let dir = Self.filePath.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Self.handToInvokingUser(dir)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(self)
         try data.write(to: Self.filePath)
+        try Self.handToInvokingUser(Self.filePath)
     }
 
     public static func load() -> CalibrationData? {
@@ -238,6 +265,78 @@ public enum CalibrationStressType: String, CaseIterable {
 
 // MARK: - Calibration Runner
 
+// MARK: - Sweep Readings
+
+/// Filters the sweep's 2 s peak CPU readings. On the Mac mini M4, Tp0W alone jumps ~27°C
+/// for 1–2 s (1, sometimes 2 readings); a single raw reading used to hit the 84°C ceiling
+/// and end the sweep, and jumps skewed the settle check and equilibrium average.
+struct CalibrationReadings {
+    /// 5 readings = 10 s: a 1–2 reading jump never reaches the median.
+    static let medianCount = 5
+    /// Safety still acts on raw readings, but needs this many in a row.
+    static let safetyReadings = 2
+
+    private var median = RollingMedian(capacity: medianCount)
+    private var count = 0
+    private var overSafety = 0
+
+    /// `filtered` is the 10 s median, nil until 5 readings are in (so a jump as the first
+    /// reading can't count); `safety` is true once 2 raw readings in a row reach 90°C.
+    mutating func add(_ raw: Float) -> (filtered: Float?, safety: Bool) {
+        let value = median.add(raw)
+        count += 1
+        overSafety = raw >= CalibrationRunner.safetyTemp ? overSafety + 1 : 0
+        return (count >= Self.medianCount ? value : nil, overSafety >= Self.safetyReadings)
+    }
+}
+
+// MARK: - Cooldown
+
+/// When to stop waiting for the machine to cool between calibration phases. A Mac mini
+/// M4 idles above 45°C, so a fixed target alone used to time out silently after 2 min.
+struct CooldownWait {
+    enum Outcome: Equatable {
+        case cooled(temp: Float)
+        case stoppedFalling(lowest: Float)
+        case timedOut(lowest: Float)
+    }
+
+    /// A drop this big counts as still cooling.
+    static let newLowStep: Float = 0.5
+    /// No new low for this long means it has stopped falling.
+    static let plateauSec: TimeInterval = 30
+    static let maxWaitSec: TimeInterval = 300
+
+    let threshold: Float
+    private var lowest: Float?
+    private var lastNewLowAt: TimeInterval = 0
+
+    init(threshold: Float) {
+        self.threshold = threshold
+    }
+
+    /// `elapsed` is seconds since the wait began. nil = keep waiting. An unreadable
+    /// temperature (0) never ends the wait except by the cap.
+    mutating func add(temp: Float, at elapsed: TimeInterval) -> Outcome? {
+        if temp > 0 {
+            if temp < threshold { return .cooled(temp: temp) }
+            if let low = lowest {
+                if temp <= low - Self.newLowStep {
+                    lowest = temp
+                    lastNewLowAt = elapsed
+                } else if elapsed - lastNewLowAt >= Self.plateauSec {
+                    return .stoppedFalling(lowest: low)
+                }
+            } else {
+                lowest = temp
+                lastNewLowAt = elapsed
+            }
+        }
+        if elapsed >= Self.maxWaitSec { return .timedOut(lowest: lowest ?? 0) }
+        return nil
+    }
+}
+
 public final class CalibrationRunner {
     private let fanControl: FanControl
     private let mode: CalibrationMode
@@ -277,6 +376,24 @@ public final class CalibrationRunner {
     /// Max synthetic load heats at ~5-8°C/sec (Notebookcheck, Max Tech).
     private static let targetHeatingRate: Float = 1.0 // °C/sec
 
+    /// Heating rate in °C/s: the median slope over every pair of readings (Theil–Sen), so a
+    /// Tp0W jump at either end (up to ~27% of the readings) can't skew it — two single
+    /// readings used to be off by ~2.7°C/s. Unreadable (0) readings are dropped; nil if
+    /// fewer than 2 remain.
+    static func heatingRate(_ samples: [(at: TimeInterval, temp: Float)]) -> Float? {
+        let valid = samples.filter { $0.temp > 0 }
+        var slopes: [Float] = []
+        for i in valid.indices {
+            for j in valid.indices where j > i && valid[j].at > valid[i].at {
+                slopes.append((valid[j].temp - valid[i].temp) / Float(valid[j].at - valid[i].at))
+            }
+        }
+        guard !slopes.isEmpty else { return nil }
+        slopes.sort()
+        let mid = slopes.count / 2
+        return slopes.count % 2 == 0 ? (slopes[mid - 1] + slopes[mid]) / 2 : slopes[mid]
+    }
+
     /// Find the stress intensity that produces ~1°C/sec heating on this machine.
     /// Fans on auto (Apple default). Starts at 1% and adjusts.
     private func findBaselineIntensity() -> Float {
@@ -297,17 +414,24 @@ public final class CalibrationRunner {
                 return 0.02
             }
 
-            // Run stress at current intensity for 10 seconds
+            // Run stress at current intensity for 10 seconds, reading every second
             startStress(intensity: intensity)
-            Thread.sleep(forTimeInterval: 10)
+            let stressStart = Date()
+            var samples: [(at: TimeInterval, temp: Float)] = []
+            for second in 0...10 {
+                samples.append((Date().timeIntervalSince(stressStart), peakCPUTemp()))
+                if second < 10 { Thread.sleep(forTimeInterval: 1) }
+            }
             stopStress()
 
-            // Measure how much temp rose
-            let endTemp = peakCPUTemp()
-            let rise = endTemp - startTemp
-            let rate = rise / 10.0 // °C/sec
+            // Measure how fast temp rose
+            guard let rate = Self.heatingRate(samples) else {
+                log("  Can't read temperature, using default intensity 0.02")
+                return 0.02
+            }
+            let endTemp = samples.last?.temp ?? 0
 
-            log("  Attempt \(attempt + 1): intensity \(String(format: "%.3f", intensity)) → \(String(format: "%.2f", rate))°C/sec (\(String(format: "%.1f", startTemp))→\(String(format: "%.1f", endTemp))°C)")
+            log("  Attempt \(attempt + 1): intensity \(String(format: "%.3f", intensity)) → \(String(format: "%.2f", rate))°C/sec (\(String(format: "%.1f", startTemp))→\(String(format: "%.1f", endTemp))°C raw)")
 
             // Check if we're in the target range (0.8-1.2 °C/sec)
             if rate >= 0.8 && rate <= 1.2 {
@@ -364,7 +488,7 @@ public final class CalibrationRunner {
     private static let ceilingTemp: Float = 84.0
 
     /// Safety: abort and max fans
-    private static let safetyTemp: Float = 90.0
+    static let safetyTemp: Float = 90.0
 
     /// Run full calibration. Blocks until complete.
     public func run() throws -> CalibrationData {
@@ -413,10 +537,12 @@ public final class CalibrationRunner {
         // Set up CSV log
         let logDir = CalibrationData.filePath.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+        try CalibrationData.handToInvokingUser(logDir)
         let timestamp = isoFormatter.string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
         let csvURL = logDir.appendingPathComponent("calibration_\(timestamp).csv")
         FileManager.default.createFile(atPath: csvURL.path, contents: nil)
+        try CalibrationData.handToInvokingUser(csvURL)
         csvHandle = try FileHandle(forWritingTo: csvURL)
         logPath = csvURL
         csvWrite("timestamp,fan_pct,actual_temp,fan0_rpm,fan1_rpm,phase")
@@ -427,6 +553,8 @@ public final class CalibrationRunner {
 
         var rawData: [(fanPct: Float, equilTemp: Float)] = []
         var abortLowerLevels = false
+        // One filter across levels, so each level starts with a full median window.
+        var sweepReadings = CalibrationReadings()
 
         for fanPct in levels {
             guard !abortLowerLevels else { break }
@@ -436,13 +564,16 @@ public final class CalibrationRunner {
 
             try fanControl.setAllFans(rpm: targetRPM)
 
+            // Median-filtered readings: the settle check and equilibrium average use these.
             var readings: [Float] = []
-            let deadline = Date().addingTimeInterval(TimeInterval(mode.maxWaitPerLevel))
+            let levelStart = Date()
+            let deadline = levelStart.addingTimeInterval(TimeInterval(mode.maxWaitPerLevel))
             var stabilized = false
 
             while Date() < deadline {
                 let temp = peakCPUTemp()
-                readings.append(temp)
+                let reading = sweepReadings.add(temp)
+                if let filtered = reading.filtered { readings.append(filtered) }
 
                 // CSV logging
                 let fan0rpm = (try? fanControl.fanInfo(0))?.actualRPM ?? 0
@@ -450,8 +581,8 @@ public final class CalibrationRunner {
                 let ts = isoFormatter.string(from: Date())
                 csvWrite("\(ts),\(String(format: "%.2f", fanPct)),\(String(format: "%.1f", temp)),\(Int(fan0rpm)),\(Int(fan1rpm)),stabilizing")
 
-                // Safety: abort if too hot
-                if temp >= Self.safetyTemp {
+                // Safety: abort if too hot (2 raw readings in a row)
+                if reading.safety {
                     log("[\(Int(fanPct * 100))%] Safety at \(String(format: "%.0f", temp))°C — maxing fans, skipping lower levels")
                     try fanControl.setMax()
                     Thread.sleep(forTimeInterval: 30)
@@ -460,9 +591,9 @@ public final class CalibrationRunner {
                     break
                 }
 
-                // Ceiling: record and skip lower levels
-                if temp >= Self.ceilingTemp {
-                    log("[\(Int(fanPct * 100))%] Ceiling reached at \(String(format: "%.1f", temp))°C")
+                // Ceiling: record and skip lower levels (filtered, so a jump doesn't count)
+                if let filtered = reading.filtered, filtered >= Self.ceilingTemp {
+                    log("[\(Int(fanPct * 100))%] Ceiling reached at \(String(format: "%.1f", filtered))°C")
                     rawData.append((fanPct: fanPct, equilTemp: Self.ceilingTemp))
                     abortLowerLevels = true
                     break
@@ -472,7 +603,7 @@ public final class CalibrationRunner {
                 if isStabilized(readings: readings) {
                     let window = readings.suffix(mode.stabilizationWindowSize)
                     let equilTemp = window.reduce(0, +) / Float(window.count)
-                    log("[\(Int(fanPct * 100))%] Stabilized at \(String(format: "%.1f", equilTemp))°C (\(readings.count * 2)s)")
+                    log("[\(Int(fanPct * 100))%] Stabilized at \(String(format: "%.1f", equilTemp))°C (\(Int(Date().timeIntervalSince(levelStart)))s)")
                     rawData.append((fanPct: fanPct, equilTemp: equilTemp))
                     stabilized = true
                     break
@@ -486,7 +617,7 @@ public final class CalibrationRunner {
                 let windowSize = min(readings.count, mode.stabilizationWindowSize)
                 let window = readings.suffix(windowSize)
                 let equilTemp = window.isEmpty ? peakCPUTemp() : window.reduce(0, +) / Float(window.count)
-                log("[\(Int(fanPct * 100))%] Timeout — best estimate: \(String(format: "%.1f", equilTemp))°C (\(readings.count * 2)s)")
+                log("[\(Int(fanPct * 100))%] Timeout — best estimate: \(String(format: "%.1f", equilTemp))°C (\(Int(Date().timeIntervalSince(levelStart)))s)")
                 rawData.append((fanPct: fanPct, equilTemp: equilTemp))
             }
         }
@@ -585,10 +716,19 @@ public final class CalibrationRunner {
     }
 
     private func waitForCooldown(below threshold: Float) {
-        for _ in 0..<60 {
-            let temp = peakCPUTemp()
-            if temp > 0 && temp < threshold {
-                log("Cooled to \(String(format: "%.1f", temp))°C")
+        var wait = CooldownWait(threshold: threshold)
+        let start = Date()
+        while true {
+            let elapsed = Date().timeIntervalSince(start)
+            if let outcome = wait.add(temp: peakCPUTemp(), at: elapsed) {
+                switch outcome {
+                case .cooled(let temp):
+                    log("Cooled to \(String(format: "%.1f", temp))°C")
+                case .stoppedFalling(let lowest):
+                    log("Stopped cooling at \(String(format: "%.1f", lowest))°C after \(Int(elapsed))s (above \(Int(threshold))°C) — continuing")
+                case .timedOut(let lowest):
+                    log("Cooldown timed out after \(Int(elapsed))s, lowest \(String(format: "%.1f", lowest))°C (above \(Int(threshold))°C) — continuing")
+                }
                 return
             }
             Thread.sleep(forTimeInterval: 2)
