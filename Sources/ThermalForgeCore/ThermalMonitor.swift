@@ -103,6 +103,9 @@ public final class ThermalMonitor {
     private var sustainedAboveCount = 0
     /// Consecutive ticks skipped for an implausible peak (see `FanProfile.isPlausibleTemp`).
     private var skippedReadings = 0
+    /// When `fanControl.refreshMonitorKeys()` last ran; nil until the first tick.
+    private var lastKeyRefresh: Date?
+    static let keyRefreshInterval: TimeInterval = 60
 
     // MARK: - Smart Profile State
 
@@ -201,8 +204,20 @@ public final class ThermalMonitor {
 
     // MARK: - Polling
 
+    /// Re-discover sensor keys at start, after a skipped reading (a discovery made while
+    /// the SMC wasn't ready reads as peak 0), and every `keyRefreshInterval`.
+    static func needsKeyRefresh(lastRefresh: Date?, now: Date, lastTickSkipped: Bool) -> Bool {
+        guard let lastRefresh else { return true }
+        return lastTickSkipped || now.timeIntervalSince(lastRefresh) >= keyRefreshInterval
+    }
+
     private func tick() {
-        guard let status = try? fanControl.status() else { return }
+        let now = Date()
+        if Self.needsKeyRefresh(lastRefresh: lastKeyRefresh, now: now, lastTickSkipped: skippedReadings > 0) {
+            fanControl.refreshMonitorKeys()
+            lastKeyRefresh = now
+        }
+        guard let status = try? fanControl.monitorStatus() else { return }
 
         // Peak CPU (TC/Tp) + GPU (TG/Tg) — the shared safety-floor sensor extraction,
         // so the client monitor and the daemon's floor read the identical value.

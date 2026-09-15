@@ -132,6 +132,24 @@ public final class SMCConnection {
         return (true, bytes, dataSize)
     }
 
+    /// Read raw bytes from an SMC key whose data size is already known (from `getKeyInfo`),
+    /// skipping the key-info call — one IOKit call instead of two.
+    public func readKey(_ key: String, knownSize dataSize: UInt32) -> (success: Bool, bytes: [UInt8], size: UInt32) {
+        guard dataSize > 0 else { return (false, [], 0) }
+        var input = SMCParamStruct()
+        var output = SMCParamStruct()
+
+        input.key = fourCharCode(key)
+        input.keyInfo.dataSize = dataSize
+        input.data8 = SMCCommand.readBytes.rawValue
+        guard callSMC(&input, &output) == kIOReturnSuccess else {
+            return (false, [], 0)
+        }
+
+        let bytes = withUnsafeBytes(of: output.bytes) { Array($0.prefix(Int(dataSize))) }
+        return (true, bytes, dataSize)
+    }
+
     /// Write raw bytes to an SMC key
     public func writeKey(_ key: String, bytes: [UInt8]) -> Bool {
         var input = SMCParamStruct()

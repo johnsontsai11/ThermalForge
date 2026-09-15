@@ -129,13 +129,6 @@ public final class FanControl {
         let modeKey = SMCFanKey.key(modeKeyTemplate, fan: index)
         let modeResult = smc.readKey(modeKey)
         let modeValue = modeResult.success && !modeResult.bytes.isEmpty ? modeResult.bytes[0] : 0
-        let mode: String
-        switch modeValue {
-        case 0: mode = "auto"
-        case 1: mode = "manual"
-        case 3: mode = "system"
-        default: mode = "unknown(\(modeValue))"
-        }
 
         return FanInfo(
             index: index,
@@ -143,8 +136,17 @@ public final class FanControl {
             targetRPM: target,
             minRPM: minimum,
             maxRPM: maximum,
-            mode: mode
+            mode: Self.modeName(modeValue)
         )
+    }
+
+    private static func modeName(_ value: UInt8) -> String {
+        switch value {
+        case 0: return "auto"
+        case 1: return "manual"
+        case 3: return "system"
+        default: return "unknown(\(value))"
+        }
     }
 
     // MARK: - Unlock
@@ -347,7 +349,10 @@ public final class FanControl {
     /// caller serializes SMC access (the daemon takes smcLock per key so a full sweep
     /// never blocks a client write for more than a single read).
     public func readTemp(_ key: String) -> Float? {
-        let result = smc.readKey(key)
+        decodeTemp(smc.readKey(key))
+    }
+
+    private func decodeTemp(_ result: (success: Bool, bytes: [UInt8], size: UInt32)) -> Float? {
         guard result.success else { return nil }
         let temp: Float
         if result.size == 4 {
@@ -392,6 +397,88 @@ public final class FanControl {
         }
 
         return ThermalStatus(fans: fans, temperatures: temps)
+    }
+
+    // MARK: - Monitor Read
+
+    // State for `monitorStatus()`. Only `refreshMonitorKeys()` and `monitorStatus()` touch
+    // it, and ThermalMonitor calls both from its serial queue — so no lock.
+    private var monitorTempKeys: [(key: String, size: UInt32)] = []
+    private var monitorKeySizes: [String: UInt32] = [:]
+    private var monitorFanLimits: [(minRPM: Int, maxRPM: Int)]?
+
+    /// The candidate keys whose key info reports a size `readTemp` can decode (flt 4 /
+    /// ioft 8 bytes), in candidate order. Keys missing on this machine report nil.
+    static func monitorTempKeySizes(candidates: [String],
+                                    keySize: (String) -> UInt32?) -> [(key: String, size: UInt32)] {
+        candidates.compactMap { key in
+            guard let size = keySize(key), size == 4 || size == 8 else { return nil }
+            return (key, size)
+        }
+    }
+
+    /// Re-discover which CPU/GPU keys exist and drop cached key sizes and fan limits.
+    /// ThermalMonitor calls this at start, after a skipped reading, and every 60 s — a
+    /// discovery made while the SMC isn't ready (boot, wake) finds nothing and is redone.
+    public func refreshMonitorKeys() {
+        monitorTempKeys = Self.monitorTempKeySizes(candidates: Self.safetyTempKeys) { smc.getKeyInfo($0)?.size }
+        monitorKeySizes = [:]
+        monitorFanLimits = nil
+    }
+
+    /// The monitor's 100ms read. Reads only the CPU/GPU keys found by
+    /// `refreshMonitorKeys()`, one IOKit call each, plus each fan's actual/target RPM and
+    /// mode; fan count and RPM limits are read once. Same shape as `status()`, but
+    /// `temperatures` holds only CPU/GPU keys — everything the monitor and menu use.
+    public func monitorStatus() throws -> ThermalStatus {
+        let limits: [(minRPM: Int, maxRPM: Int)]
+        if let cached = monitorFanLimits {
+            limits = cached
+        } else {
+            let count = try fanCount()
+            limits = (0..<count).map { i in
+                (minRPM: Int(readFanFloat(i, template: SMCFanKey.minimum)),
+                 maxRPM: Int(readFanFloat(i, template: SMCFanKey.maximum)))
+            }
+            // A zero max (SMC not ready) isn't cached, so the next tick reads it again.
+            if limits.allSatisfy({ $0.maxRPM > 0 }) { monitorFanLimits = limits }
+        }
+
+        let fans = limits.enumerated().map { i, limit in
+            let mode = readMonitorKey(SMCFanKey.key(modeKeyTemplate, fan: i))
+            return ThermalStatus.FanStatus(
+                index: i,
+                actualRPM: Int(readMonitorFanFloat(i, template: SMCFanKey.actual)),
+                targetRPM: Int(readMonitorFanFloat(i, template: SMCFanKey.target)),
+                minRPM: limit.minRPM,
+                maxRPM: limit.maxRPM,
+                mode: Self.modeName(mode.success ? mode.bytes.first ?? 0 : 0)
+            )
+        }
+
+        var temps: [String: Float] = [:]
+        for (key, size) in monitorTempKeys {
+            if let t = decodeTemp(smc.readKey(key, knownSize: size)) { temps[key] = t }
+        }
+
+        return ThermalStatus(fans: fans, temperatures: temps)
+    }
+
+    /// `smc.readKey` with the key's size cached. A failed read drops the cached size so
+    /// the next read looks it up again.
+    private func readMonitorKey(_ key: String) -> (success: Bool, bytes: [UInt8], size: UInt32) {
+        guard let size = monitorKeySizes[key] ?? smc.getKeyInfo(key)?.size, size > 0 else {
+            return (false, [], 0)
+        }
+        let result = smc.readKey(key, knownSize: size)
+        monitorKeySizes[key] = result.success ? size : nil
+        return result
+    }
+
+    private func readMonitorFanFloat(_ fan: Int, template: String) -> Float {
+        let result = readMonitorKey(SMCFanKey.key(template, fan: fan))
+        guard result.success else { return 0 }
+        return smcBytesToFloat(result.bytes, size: result.size)
     }
 
     // MARK: - Discover
