@@ -66,11 +66,16 @@ caffeinate -i -w $$ &
 
 # Start from a comparable state: wait (bounded) for the hottest core to cool
 echo "Waiting up to ${START_WAIT_SEC}s for the hottest core to drop below ${START_BELOW}°C..."
+# A failed read (empty) counts as "not cool yet", so it can't end the wait early.
 waited=0
-while read -r temp _ <<<"$(sample)"; [ "${temp%.*}" -ge "$START_BELOW" ] && [ "$waited" -lt "$START_WAIT_SEC" ]; do
+while :; do
+    read -r temp _ <<<"$(sample)"
+    whole="${temp%.*}"
+    [ -n "$whole" ] && [ "$whole" -lt "$START_BELOW" ] && break
+    [ "$waited" -ge "$START_WAIT_SEC" ] && break
     sleep 5; waited=$((waited + 5))
 done
-echo "Starting at ${temp}°C"
+echo "Starting at ${temp:-unknown}°C"
 
 total=$((BURST_PHASE_SEC + SUSTAINED_SEC + SETTLE_SEC))
 start_epoch=$(date +%s)

@@ -165,6 +165,20 @@ struct AdaptiveProfileTests {
         #expect(FanProfile.selectable(id: bad.id, among: loaded).id == "silent")
     }
 
+    @Test("Corrupt profile files are skipped without dropping valid ones")
+    func corruptFileSkipped() throws {
+        let good = profile(id: "test_corrupt_neighbor")
+        let corrupt = profilesDir.appendingPathComponent("test_corrupt.json")
+        try good.save()
+        try Data("{ not json".utf8).write(to: corrupt)
+        defer {
+            try? FileManager.default.removeItem(at: corrupt)
+            try? FileManager.default.removeItem(at: profilesDir.appendingPathComponent("\(good.id).json"))
+        }
+
+        #expect(FanProfile.loadAll().contains(good))
+    }
+
     @Test("Profile JSON without adaptive settings still decodes")
     func legacyJSONDecodes() throws {
         let json = """

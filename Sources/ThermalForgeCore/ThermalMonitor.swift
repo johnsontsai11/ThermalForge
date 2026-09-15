@@ -250,7 +250,7 @@ public final class ThermalMonitor {
 
         // Profile-specific logic
         if activeProfile.curve.adaptive != nil {
-            tickSmart(status: status, peakTemp: controlTemp)
+            tickAdaptive(status: status, peakTemp: controlTemp)
         } else {
             tickCurve(status: status, peakTemp: controlTemp)
         }
@@ -332,7 +332,7 @@ public final class ThermalMonitor {
     /// Smart's logic, driven by the active profile's curve and `adaptive` settings.
     /// Built-in Smart: stop 50°C, start 53°C, ceiling 85°C, 100% cap, S-curve, boost 0.2.
     /// `peakTemp` is the control temperature (smoothed when the profile asks for it).
-    private func tickSmart(status: ThermalStatus, peakTemp: Float) {
+    private func tickAdaptive(status: ThermalStatus, peakTemp: Float) {
         let curve = activeProfile.curve
         let name = activeProfile.name
 

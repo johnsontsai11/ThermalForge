@@ -98,7 +98,9 @@ public struct FanProfile: Codable, Identifiable, Equatable {
             /// Seconds of peak-temperature history averaged into the control temperature.
             /// 0 reacts to each raw reading. The 95°C safety override always uses raw readings.
             public let smoothingSec: Float
-            /// Fan fraction added per °C/sec of temperature rise.
+            /// Fan fraction added per °C/sec of temperature rise. When a calibration table is in
+            /// use, the boost is 0.75 × this, growing to 1.5 × this at the ceiling (built-in
+            /// Smart: 0.2 uncalibrated, 0.15–0.3 calibrated).
             public let rateBoost: Float
             /// Use the machine calibration table (if one exists) instead of the curve.
             public let useCalibration: Bool
@@ -313,18 +315,21 @@ extension FanProfile {
 
         var profiles = builtIn
         for file in files where file.pathExtension == "json" {
-            if let data = try? Data(contentsOf: file),
-               let profile = try? JSONDecoder().decode(FanProfile.self, from: data)
-            {
-                if let error = profile.validationError {
-                    TFLogger.shared.error("Skipped profile \(file.lastPathComponent): \(error)")
-                    continue
-                }
-                if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
-                    profiles[idx] = profile
-                } else {
-                    profiles.append(profile)
-                }
+            let profile: FanProfile
+            do {
+                profile = try JSONDecoder().decode(FanProfile.self, from: Data(contentsOf: file))
+            } catch {
+                TFLogger.shared.error("Skipped profile \(file.lastPathComponent): unreadable or not valid profile JSON (\(error))")
+                continue
+            }
+            if let error = profile.validationError {
+                TFLogger.shared.error("Skipped profile \(file.lastPathComponent): \(error)")
+                continue
+            }
+            if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
+                profiles[idx] = profile
+            } else {
+                profiles.append(profile)
             }
         }
         return profiles
