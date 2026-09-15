@@ -38,4 +38,55 @@ struct AnomalyFilterTests {
         for _ in 0..<31 { filtered = median.add(75) } // load that sticks past half the window
         #expect(filtered == 75)
     }
+
+    // MARK: - Process history
+
+    private static let second: UInt64 = 1_000_000_000
+
+    @Test("Top processes by CPU share since the last sample, busiest first")
+    func topProcessesByCPUShare() {
+        var tracker = ProcessCPUTracker()
+        _ = tracker.update([.init(pid: 10, name: "swift-frontend", cpuNs: 0),
+                            .init(pid: 11, name: "yes", cpuNs: 5 * Self.second),
+                            .init(pid: 12, name: "Finder", cpuNs: 0)], at: 0)
+        // 2 s later: yes used a full core, swift-frontend half of one, Finder 0.05%.
+        let history = tracker.update([.init(pid: 10, name: "swift-frontend", cpuNs: Self.second),
+                                      .init(pid: 11, name: "yes", cpuNs: 7 * Self.second),
+                                      .init(pid: 12, name: "Finder", cpuNs: 1_000_000)], at: 2 * Self.second)
+        #expect(history == "yes(100.0%), swift-frontend(50.0%)")
+    }
+
+    @Test("No baseline yet reads unavailable, not idle")
+    func firstSampleUnavailable() {
+        var tracker = ProcessCPUTracker()
+        #expect(tracker.update([.init(pid: 11, name: "yes", cpuNs: 5 * Self.second)], at: 0) == "unavailable")
+    }
+
+    @Test("Nothing above 0.1% reads idle")
+    func quietSystemIdle() {
+        var tracker = ProcessCPUTracker()
+        _ = tracker.update([.init(pid: 12, name: "Finder", cpuNs: 0)], at: 0)
+        #expect(tracker.update([.init(pid: 12, name: "Finder", cpuNs: 1_000_000)], at: 2 * Self.second) == "idle")
+    }
+
+    @Test("Keeps only the top 5")
+    func topFiveOnly() {
+        var tracker = ProcessCPUTracker()
+        let pids: [Int32] = [1, 2, 3, 4, 5, 6]
+        _ = tracker.update(pids.map { .init(pid: $0, name: "p\($0)", cpuNs: 0) }, at: 0)
+        // pN used N × 10% of a core over 1 s.
+        let history = tracker.update(pids.map { .init(pid: $0, name: "p\($0)", cpuNs: UInt64($0) * Self.second / 10) },
+                                     at: Self.second)
+        #expect(history == "p6(60.0%), p5(50.0%), p4(40.0%), p3(30.0%), p2(20.0%)")
+    }
+
+    @Test("A new or reused pid needs its own baseline")
+    func newOrReusedPidSkipped() {
+        var tracker = ProcessCPUTracker()
+        _ = tracker.update([.init(pid: 20, name: "old", cpuNs: 9 * Self.second)], at: 0)
+        // pid 20 exited and was reused (CPU time went backwards); pid 21 just started.
+        let history = tracker.update([.init(pid: 20, name: "new", cpuNs: Self.second),
+                                      .init(pid: 21, name: "fresh", cpuNs: Self.second)], at: Self.second)
+        #expect(history == "idle")
+    }
 }

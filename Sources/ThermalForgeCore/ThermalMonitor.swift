@@ -95,6 +95,40 @@ struct RollingMedian {
     }
 }
 
+/// One process's cumulative CPU time (user + system), in nanoseconds.
+struct ProcessCPUSample {
+    let pid: pid_t
+    let name: String
+    let cpuNs: UInt64
+}
+
+/// Per-process CPU share between consecutive samples, for the anomaly log's process history.
+/// macOS leaves `kinfo_proc.p_pctcpu` at 0, so the share comes from CPU time deltas. A pid
+/// with no usable baseline (new, or its CPU time went backwards after pid reuse) is skipped.
+struct ProcessCPUTracker {
+    private var previous: [pid_t: UInt64] = [:]
+    private var previousAt: UInt64?
+
+    /// "name(12.3%), ..." for the top 5 above 0.1% of a core, "idle" if none, or
+    /// "unavailable" on the first sample (no baseline yet).
+    mutating func update(_ samples: [ProcessCPUSample], at nowNs: UInt64) -> String {
+        defer {
+            previous = Dictionary(samples.map { ($0.pid, $0.cpuNs) }, uniquingKeysWith: { $1 })
+            previousAt = nowNs
+        }
+        guard let lastAt = previousAt, nowNs > lastAt else { return "unavailable" }
+        let elapsed = Double(nowNs - lastAt)
+        let busy = samples.compactMap { sample -> (name: String, percent: Double)? in
+            guard let before = previous[sample.pid], sample.cpuNs >= before else { return nil }
+            let percent = Double(sample.cpuNs - before) / elapsed * 100
+            return percent > 0.1 ? (sample.name, percent) : nil
+        }
+        let top5 = busy.sorted { $0.percent > $1.percent }.prefix(5)
+        if top5.isEmpty { return "idle" }
+        return top5.map { "\($0.name)(\(String(format: "%.1f", $0.percent))%)" }.joined(separator: ", ")
+    }
+}
+
 // MARK: - Thermal Monitor
 
 public final class ThermalMonitor {
@@ -154,6 +188,8 @@ public final class ThermalMonitor {
     /// Rolling buffer — captures what was running BEFORE a spike.
     /// 15 snapshots × 2 seconds = 30 seconds of pre-spike history.
     private var processBuffer: [(timestamp: String, processes: String)] = []
+    /// CPU time per pid from the previous capture, to turn into a share of a core.
+    private var processCPU = ProcessCPUTracker()
     private let isoFormatter = ISO8601DateFormatter()
 
     /// Call this to suppress anomaly logging during calibration
@@ -567,40 +603,35 @@ public final class ThermalMonitor {
 
     // MARK: - Process Capture
 
-    /// Capture top 5 processes by CPU for anomaly logging
+    /// Mach absolute time units → nanoseconds (125/3 on Apple Silicon, 1/1 on Intel).
+    private static let machTimebase: mach_timebase_info = {
+        var timebase = mach_timebase_info()
+        mach_timebase_info(&timebase)
+        return timebase
+    }()
+
+    /// Capture top 5 processes by CPU for anomaly logging. Without root only the user's own
+    /// processes are readable, so root daemons (mds_stores, backupd, …) never appear.
     private func captureTopProcesses() -> String {
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
-        var size = 0
-        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return "unavailable" }
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else { return "unavailable" }
+        var pids = [pid_t](repeating: 0, count: Int(count) + 32)   // room for processes started since
+        let listed = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        guard listed > 0 else { return "unavailable" }
 
-        let count = size / MemoryLayout<kinfo_proc>.stride
-        var procs = [kinfo_proc](repeating: kinfo_proc(), count: count)
-        guard sysctl(&mib, 4, &procs, &size, nil, 0) == 0 else { return "unavailable" }
+        let timebase = Self.machTimebase
+        var info = proc_taskinfo()
+        let infoSize = Int32(MemoryLayout<proc_taskinfo>.size)
+        var nameBuffer = [CChar](repeating: 0, count: 2 * Int(MAXCOMLEN) + 1)
+        var samples: [ProcessCPUSample] = []
 
-        let actualCount = size / MemoryLayout<kinfo_proc>.stride
-        var results: [(name: String, cpu: Double)] = []
-
-        for i in 0..<actualCount {
-            let proc = procs[i]
-            let pid = proc.kp_proc.p_pid
-            guard pid > 0 else { continue }
-
-            let name = withUnsafePointer(to: proc.kp_proc.p_comm) { ptr in
-                ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXCOMLEN)) {
-                    String(cString: $0)
-                }
-            }
-
-            guard !name.isEmpty, name != "kernel_task" else { continue }
-            let cpuPct = Double(proc.kp_proc.p_pctcpu) / 100.0
-            if cpuPct > 0.1 {
-                results.append((name, cpuPct))
-            }
+        for pid in pids.prefix(Int(listed)) where pid > 0 {
+            guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, infoSize) == infoSize,
+                  proc_name(pid, &nameBuffer, UInt32(nameBuffer.count)) > 0 else { continue }
+            let cpuNs = (info.pti_total_user + info.pti_total_system) * UInt64(timebase.numer) / UInt64(timebase.denom)
+            samples.append(ProcessCPUSample(pid: pid, name: String(cString: nameBuffer), cpuNs: cpuNs))
         }
-
-        let top5 = results.sorted { $0.cpu > $1.cpu }.prefix(5)
-        if top5.isEmpty { return "idle" }
-        return top5.map { "\($0.name)(\(String(format: "%.1f", $0.cpu))%)" }.joined(separator: ", ")
+        return processCPU.update(samples, at: DispatchTime.now().uptimeNanoseconds)
     }
 
     // MARK: - Helpers
