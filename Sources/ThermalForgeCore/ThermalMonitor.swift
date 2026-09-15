@@ -101,6 +101,8 @@ public final class ThermalMonitor {
     private var lastAppliedRPMPercent: Float = 0
     private var fansCurrentlyRunning = false
     private var sustainedAboveCount = 0
+    /// Consecutive ticks skipped for an implausible peak (see `FanProfile.isPlausibleTemp`).
+    private var skippedReadings = 0
 
     // MARK: - Smart Profile State
 
@@ -201,11 +203,30 @@ public final class ThermalMonitor {
 
     private func tick() {
         guard let status = try? fanControl.status() else { return }
-        latestStatus = status
 
         // Peak CPU (TC/Tp) + GPU (TG/Tg) — the shared safety-floor sensor extraction,
         // so the client monitor and the daemon's floor read the identical value.
         let maxTemp = status.safetyPeakTemp
+
+        // Implausible peak (e.g. 7.3°C just after wake): skip the whole tick so fans
+        // keep their last command. Logged once per run, not every 100ms.
+        guard FanProfile.isPlausibleTemp(maxTemp) else {
+            if skippedReadings == 0 {
+                let fan0 = status.fans.first
+                TFLogger.shared.info(
+                    "Skipping implausible readings: peak \(String(format: "%.1f", maxTemp))°C | " +
+                    "Fan0: \(fan0?.actualRPM ?? 0) RPM, range \(fan0?.minRPM ?? 0)–\(fan0?.maxRPM ?? 0) RPM " +
+                    "(\(fan0?.mode ?? "?")) | Profile: \(activeProfile.name)"
+                )
+            }
+            skippedReadings += 1
+            return
+        }
+        if skippedReadings > 0 {
+            TFLogger.shared.info("Readings plausible again after \(skippedReadings) skipped ticks")
+            skippedReadings = 0
+        }
+        latestStatus = status
 
         // Control temperature: smoothed for adaptive profiles that ask for it, raw otherwise.
         // Updated every tick (even during a safety override) so the window stays continuous.

@@ -81,6 +81,15 @@ struct DaemonInvariantsTests {
         #expect(floor.evaluate(temp: 80, holdCommand: nil, suspended: true) == .restore)
     }
 
+    @Test("an implausible reading never engages or releases the override")
+    func thermalFloorIgnoresImplausibleReading() {
+        let floor = ThermalFloor()
+        // 7.3°C just after wake would otherwise read as "cooled" and drop fans off max.
+        #expect(floor.evaluate(temp: 7.3, holdCommand: "set 2000", suspended: true) == .none)
+        #expect(floor.evaluate(temp: 7.3, holdCommand: nil, suspended: true) == .none)
+        #expect(floor.evaluate(temp: 7.3, holdCommand: "set 2000", suspended: false) == .none)
+    }
+
     @Test("thresholds mirror FanProfile, not hardcoded numbers")
     func thermalFloorThresholdsMirrorProfile() {
         let floor = ThermalFloor()

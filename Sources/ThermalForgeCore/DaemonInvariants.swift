@@ -61,6 +61,8 @@ public struct ThermalFloor {
     /// - suspended: is the floor currently overriding fans to max?
     /// - holdCommand: the active hold's command string, or nil for auto / no hold.
     public func evaluate(temp: Float, holdCommand: String?, suspended: Bool) -> Action {
+        // A bogus post-wake reading must not look "cooled" and release the override.
+        guard FanProfile.isPlausibleTemp(temp) else { return .none }
         if suspended {
             // Restore only once cooled past the hysteresis point; otherwise keep max.
             return temp < clearBelow ? .restore : .none

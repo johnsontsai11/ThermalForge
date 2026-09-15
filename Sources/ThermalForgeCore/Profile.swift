@@ -359,4 +359,13 @@ extension FanProfile {
     public static let safetyTempThreshold: Float = 95.0
     /// Hysteresis deadband to prevent oscillation
     public static let hysteresisDegrees: Float = 5.0
+    /// Lowest peak CPU/GPU temperature treated as a real reading. Just after wake the
+    /// SMC reports a constant 7.3°C before its sensors are ready; a running chip
+    /// indoors never reads this low.
+    public static let minPlausibleTemp: Float = 15.0
+
+    /// Whether a peak temperature can be trusted to drive fan decisions.
+    public static func isPlausibleTemp(_ temp: Float) -> Bool {
+        temp >= minPlausibleTemp
+    }
 }

@@ -304,4 +304,16 @@ struct ProfileTests {
         #expect(FanProfile.max.curve.sustainedTriggerSec == 5)          // Attack dog threshold
         #expect(FanProfile.smart.curve.sustainedTriggerSec == 6)        // Proactive
     }
+
+    // MARK: - Implausible Readings
+
+    @Test("a peak below 15°C is implausible — the SMC reports 7.3°C just after wake")
+    func plausibleTempCutoff() {
+        #expect(!FanProfile.isPlausibleTemp(7.3))    // observed post-wake value
+        #expect(!FanProfile.isPlausibleTemp(0))      // every key missing
+        #expect(!FanProfile.isPlausibleTemp(14.9))
+        #expect(FanProfile.isPlausibleTemp(15))
+        #expect(FanProfile.isPlausibleTemp(40))
+        #expect(FanProfile.isPlausibleTemp(FanProfile.safetyTempThreshold))
+    }
 }
