@@ -70,6 +70,31 @@ struct RollingAverage {
     }
 }
 
+/// Median of the most recent `capacity` samples. Used for anomaly logging: a per-core
+/// blip shorter than half the window vanishes, while a real step keeps its full size.
+struct RollingMedian {
+    let capacity: Int
+    private var samples: [Float] = []
+    private var next = 0
+
+    init(capacity: Int) {
+        self.capacity = max(capacity, 1)
+    }
+
+    /// Add a sample and return the median of the retained window.
+    mutating func add(_ value: Float) -> Float {
+        if samples.count < capacity {
+            samples.append(value)
+        } else {
+            samples[next] = value
+            next = (next + 1) % capacity
+        }
+        let sorted = samples.sorted()
+        let mid = sorted.count / 2
+        return sorted.count % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+    }
+}
+
 // MARK: - Thermal Monitor
 
 public final class ThermalMonitor {
@@ -117,6 +142,9 @@ public final class ThermalMonitor {
 
     /// Tracks temps over 30 seconds (15 readings at 2s monitor cadence)
     private var anomalyHistory: [Float] = []
+    /// 6-second median of the peak (60 ticks at 100ms). Tp0W on the Mac mini M4 blips
+    /// ~27°C for 1–2s every few seconds at idle; the raw peak logged each blip twice.
+    private var anomalyMedian = RollingMedian(capacity: 60)
     private var isCalibrating = false
 
     // MARK: - Process Buffer
@@ -246,10 +274,12 @@ public final class ThermalMonitor {
         // Control temperature: smoothed for adaptive profiles that ask for it, raw otherwise.
         // Updated every tick (even during a safety override) so the window stays continuous.
         let controlTemp = controlTempAverage?.add(maxTemp) ?? maxTemp
+        // Anomaly temperature: median-filtered so brief per-core blips aren't logged as spikes.
+        let anomalyTemp = anomalyMedian.add(maxTemp)
 
         // Monitor cadence: process capture + anomaly detection (every 2 seconds)
         if tickCounter % Self.monitorCadence == 0 {
-            monitorTick(status: status, maxTemp: maxTemp)
+            monitorTick(status: status, anomalyTemp: anomalyTemp)
         }
 
         // Safety override: any sensor > 95°C
@@ -303,7 +333,7 @@ public final class ThermalMonitor {
 
     /// Heavy operations: process capture + anomaly detection.
     /// Runs at 2-second intervals to avoid sysctl overhead at 100ms.
-    private func monitorTick(status: ThermalStatus, maxTemp: Float) {
+    private func monitorTick(status: ThermalStatus, anomalyTemp: Float) {
         // Rolling process buffer — always capturing, like a security camera
         let currentProcs = captureTopProcesses()
         let ts = isoFormatter.string(from: Date())
@@ -318,12 +348,12 @@ public final class ThermalMonitor {
 
             // Tier 1: check against previous reading
             if let prevTemp = anomalyHistory.last {
-                let instantDelta = maxTemp - prevTemp
+                let instantDelta = anomalyTemp - prevTemp
                 if abs(instantDelta) > 5 {
                     let direction = instantDelta > 0 ? "spike" : "drop"
                     let fan0 = status.fans.first
                     TFLogger.shared.info(
-                        "Instant \(direction): \(String(format: "%.1f", prevTemp))→\(String(format: "%.1f", maxTemp))°C " +
+                        "Instant \(direction): \(String(format: "%.1f", prevTemp))→\(String(format: "%.1f", anomalyTemp))°C " +
                         "(\(String(format: "%+.1f", instantDelta))°C in 2s) | " +
                         "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
                         "Profile: \(activeProfile.name)"
@@ -335,12 +365,12 @@ public final class ThermalMonitor {
             // Tier 2: check over 30-second window
             if anomalyHistory.count >= 15 {
                 let oldest = anomalyHistory.first!
-                let sustainedDelta = maxTemp - oldest
+                let sustainedDelta = anomalyTemp - oldest
                 if abs(sustainedDelta) > 10 {
                     let direction = sustainedDelta > 0 ? "spike" : "drop"
                     let fan0 = status.fans.first
                     TFLogger.shared.info(
-                        "Sustained \(direction): \(String(format: "%.1f", oldest))→\(String(format: "%.1f", maxTemp))°C " +
+                        "Sustained \(direction): \(String(format: "%.1f", oldest))→\(String(format: "%.1f", anomalyTemp))°C " +
                         "(\(String(format: "%+.1f", sustainedDelta))°C in 30s) | " +
                         "Fan0: \(fan0?.actualRPM ?? 0) RPM (\(fan0?.mode ?? "?")) | " +
                         "Profile: \(activeProfile.name)"
@@ -359,7 +389,7 @@ public final class ThermalMonitor {
             }
         }
 
-        anomalyHistory.append(maxTemp)
+        anomalyHistory.append(anomalyTemp)
         if anomalyHistory.count > 15 { anomalyHistory.removeFirst() }
     }
 
