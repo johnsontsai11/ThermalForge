@@ -156,8 +156,9 @@ public final class ThermalMonitor {
 
     /// Monitor work: process capture, anomaly detection, history logging.
     private static let monitorIntervalSec: Float = 2
-    /// onUpdate cadence — smooth UI without excessive redraws.
-    private static let uiUpdateIntervalSec: Float = 0.5
+    /// onUpdate cadence — smooth UI without excessive redraws. A whole number of
+    /// default ticks (3 × 200ms), so it isn't rounded to a different interval.
+    private static let uiUpdateIntervalSec: Float = 0.6
     /// Window for the anomaly median (see `anomalyMedian`).
     private static let anomalyMedianSec: Float = 6
 
@@ -223,7 +224,7 @@ public final class ThermalMonitor {
         return data
     }()
 
-    /// Called on UI update cadence (every 500ms) with updated status
+    /// Called on UI update cadence (`uiUpdateIntervalSec`) with updated status
     public var onUpdate: ((ThermalStatus, FanProfile, MonitorState) -> Void)?
     /// Called when a fan command needs to be executed (may require privilege)
     public var onFanCommand: ((FanCommand) throws -> Void)?

@@ -79,7 +79,7 @@ public struct ThermalFloor {
 /// Whether the peak has stayed at/above the safety threshold for `FanProfile.safetySustainSec`
 /// straight. On the Mac mini M4 under load, Tp0W alone jumps past 95°C for 1–2 SMC updates
 /// (~1 s each) while the other sensors stay ≤94°C; real overheating stays. The clock is
-/// injected, so the monitor (100ms ticks) and the daemon floor (1 s) share the rule.
+/// injected, so the monitor (200ms ticks) and the daemon floor (1 s) share the rule.
 public struct SustainedHeat {
     /// Readings further apart than this aren't continuous: a daemon that wasn't sampling
     /// (no hold) or a run of failed reads restarts the count rather than bridging it.

@@ -426,7 +426,7 @@ public final class FanControl {
         monitorFanLimits = nil
     }
 
-    /// The monitor's 100ms read. Reads only the CPU/GPU keys found by
+    /// The monitor's per-tick (200ms) read. Reads only the CPU/GPU keys found by
     /// `refreshMonitorKeys()`, one IOKit call each, plus each fan's actual/target RPM and
     /// mode; fan count and RPM limits are read once. Same shape as `status()`, but
     /// `temperatures` holds only CPU/GPU keys — everything the monitor and menu use.

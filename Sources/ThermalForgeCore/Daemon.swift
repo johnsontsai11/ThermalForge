@@ -510,7 +510,7 @@ public final class DaemonServer {
 
     // MARK: - Thermal Safety Floor
 
-    /// 1s cadence: the client monitor at 100ms is primary; this is a backstop, and
+    /// 1s cadence: the client monitor at 200ms is primary; this is a backstop, and
     /// thermal mass doesn't move meaningfully in a second.
     private static let thermalCadence: TimeInterval = 1.0
 
@@ -548,7 +548,7 @@ public final class DaemonServer {
         // managing thermals and there is nothing for the floor to override, so a reading
         // it could not act on is not safety. The floor exists for one case: ThermalForge
         // has pinned fans below what the machine needs and something has gone wrong. The
-        // client monitor at 100ms is the primary governor with its own override; this is
+        // client monitor at 200ms is the primary governor with its own override; this is
         // the backstop that survives the app's death. So an idle daemon does zero SMC
         // work per tick — only a live below-max hold (or an active suspension) samples.
         stateLock.lock()

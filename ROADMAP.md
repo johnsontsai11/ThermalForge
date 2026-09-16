@@ -55,13 +55,13 @@ Apple's fan hardware behavior (sources: macos-smc-fan reverse engineering, Tunab
 
 ### Dual-cadence architecture
 
-Thermal polling now runs at 100ms (matching Apple's thermalmonitord) for smooth fan transitions. Heavy operations run at a slower 2-second cadence to avoid overhead:
+Thermal polling runs at 200ms for smooth fan transitions (100ms, matching Apple's thermalmonitord, until the tick's SMC reads proved the app's main CPU cost). Heavy operations run at a slower 2-second cadence to avoid overhead:
 
 | Cadence | Interval | Operations |
 |---|---|---|
-| **Thermal tick** | 100ms | Read temps, calculate curve, apply ramp governor, write fan speed |
-| **Monitor tick** | 2 seconds (every 20th tick) | Process capture (sysctl), anomaly detection, temp history for Smart |
-| **UI update** | 500ms (every 5th tick) | Push status to SwiftUI menu bar |
+| **Thermal tick** | 200ms | Read temps, calculate curve, apply ramp governor, write fan speed |
+| **Monitor tick** | 2 seconds (every 10th tick) | Process capture (sysctl), anomaly detection, temp history for Smart |
+| **UI update** | 600ms (every 3rd tick) | Push status to SwiftUI menu bar |
 
 ### Profile curve design
 
