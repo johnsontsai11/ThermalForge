@@ -5,8 +5,11 @@
 //  Polling engine that reads temperatures and applies fan profiles.
 //
 //  Dual-cadence design:
-//  - Thermal tick (100ms): read temps, calculate curve, apply ramp governor, write fan speed
+//  - Thermal tick (200ms): read temps, calculate curve, apply ramp governor, write fan speed
 //  - Monitor tick (2s): process capture, anomaly detection, history logging
+//
+//  Every cadence is written in seconds and converted to ticks against `tickInterval`,
+//  so changing the tick rate costs less CPU without changing any timing behaviour.
 //
 
 import Darwin
@@ -143,15 +146,30 @@ public final class ThermalMonitor {
     // MARK: - Tick Timing
 
     /// Thermal tick interval in seconds. Fan control runs at this rate.
+    /// Each tick is one SMC sweep, and those reads dominate the monitor's CPU cost,
+    /// so this is the one knob trading CPU for control resolution.
     private let tickInterval: Float
 
-    /// Monitor cadence: process capture + anomaly detection every N thermal ticks.
-    /// At 100ms thermal tick, 20 × 0.1s = 2 seconds.
-    private static let monitorCadence = 20
+    /// Default thermal tick. Ramp governors move the fan ~20 RPM per tick and the
+    /// shortest sustained trigger is seconds long, so polling finer buys no control.
+    public static let defaultTickInterval: Float = 0.2
 
-    /// UI update cadence: onUpdate fires every N thermal ticks.
-    /// At 100ms thermal tick, 5 × 0.1s = 500ms — smooth UI without excessive redraws.
-    private static let uiUpdateCadence = 5
+    /// Monitor work: process capture, anomaly detection, history logging.
+    private static let monitorIntervalSec: Float = 2
+    /// onUpdate cadence — smooth UI without excessive redraws.
+    private static let uiUpdateIntervalSec: Float = 0.5
+    /// Window for the anomaly median (see `anomalyMedian`).
+    private static let anomalyMedianSec: Float = 6
+
+    /// Cadences in ticks, derived from `tickInterval` so they keep their wall-clock
+    /// meaning whatever the tick rate.
+    private var monitorCadence: Int { Self.ticks(for: Self.monitorIntervalSec, interval: tickInterval) }
+    private var uiUpdateCadence: Int { Self.ticks(for: Self.uiUpdateIntervalSec, interval: tickInterval) }
+
+    /// Whole ticks spanning `seconds`, never fewer than one.
+    static func ticks(for seconds: Float, interval: Float) -> Int {
+        max(Int((seconds / interval).rounded()), 1)
+    }
 
     private var tickCounter = 0
 
@@ -178,9 +196,9 @@ public final class ThermalMonitor {
 
     /// Tracks temps over 30 seconds (15 readings at 2s monitor cadence)
     private var anomalyHistory: [Float] = []
-    /// 6-second median of the peak (60 ticks at 100ms). Tp0W on the Mac mini M4 blips
+    /// Median of the peak over `anomalyMedianSec`. Tp0W on the Mac mini M4 blips
     /// ~27°C for 1–2s every few seconds at idle; the raw peak logged each blip twice.
-    private var anomalyMedian = RollingMedian(capacity: 60)
+    private var anomalyMedian: RollingMedian
     private var isCalibrating = false
 
     // MARK: - Process Buffer
@@ -210,10 +228,16 @@ public final class ThermalMonitor {
     /// Called when a fan command needs to be executed (may require privilege)
     public var onFanCommand: ((FanCommand) throws -> Void)?
 
-    public init(fanControl: FanControl, profile: FanProfile = .silent) {
+    public init(fanControl: FanControl,
+                profile: FanProfile = .silent,
+                tickInterval: Float = ThermalMonitor.defaultTickInterval) {
+        let interval = max(tickInterval, 0.01)
         self.fanControl = fanControl
         self.activeProfile = profile
-        self.tickInterval = 0.1
+        self.tickInterval = interval
+        self.anomalyMedian = RollingMedian(
+            capacity: Self.ticks(for: Self.anomalyMedianSec, interval: interval)
+        )
         self.controlTempAverage = makeControlTempAverage(for: profile)
     }
 
@@ -225,11 +249,13 @@ public final class ThermalMonitor {
 
     // MARK: - Lifecycle
 
-    public func start(interval: TimeInterval = 0.1) {
+    /// Runs the thermal tick at `tickInterval`. The rate is fixed at init so the
+    /// derived cadences can't drift from the timer that drives them.
+    public func start() {
         stop()
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: interval)
+        timer.schedule(deadline: .now(), repeating: Double(tickInterval))
         timer.setEventHandler { [weak self] in
             self?.tick()
         }
@@ -316,7 +342,7 @@ public final class ThermalMonitor {
         let anomalyTemp = anomalyMedian.add(maxTemp)
 
         // Monitor cadence: process capture + anomaly detection (every 2 seconds)
-        if tickCounter % Self.monitorCadence == 0 {
+        if tickCounter % monitorCadence == 0 {
             monitorTick(status: status, anomalyTemp: anomalyTemp)
         }
 
@@ -331,7 +357,7 @@ public final class ThermalMonitor {
                 lastAppliedRPMPercent = 1.0
                 TFLogger.shared.safety("Override triggered: \(String(format: "%.1f", maxTemp))°C — fans maxed")
             }
-            if tickCounter % Self.uiUpdateCadence == 0 {
+            if tickCounter % uiUpdateCadence == 0 {
                 onUpdate?(status, activeProfile, state)
             }
             tickCounter += 1
@@ -361,8 +387,8 @@ public final class ThermalMonitor {
             tickCurve(status: status, peakTemp: controlTemp)
         }
 
-        // UI update at slower cadence (every 500ms)
-        if tickCounter % Self.uiUpdateCadence == 0 {
+        // UI update at slower cadence (uiUpdateIntervalSec)
+        if tickCounter % uiUpdateCadence == 0 {
             onUpdate?(status, activeProfile, state)
         }
 
@@ -443,7 +469,7 @@ public final class ThermalMonitor {
         let name = activeProfile.name
 
         // Sample temperature history at monitor cadence (2s) for stable rate-of-change
-        if tickCounter % Self.monitorCadence == 0 {
+        if tickCounter % monitorCadence == 0 {
             tempHistory.append(peakTemp)
             if tempHistory.count > 4 { tempHistory.removeFirst() }
         }
@@ -518,7 +544,7 @@ public final class ThermalMonitor {
         let oldest = tempHistory.first!
         let newest = tempHistory.last!
         // tempHistory sampled at monitor cadence (2s intervals)
-        let seconds = Float(tempHistory.count - 1) * Float(Self.monitorCadence) * tickInterval
+        let seconds = Float(tempHistory.count - 1) * Float(monitorCadence) * tickInterval
         return (newest - oldest) / seconds
     }
 

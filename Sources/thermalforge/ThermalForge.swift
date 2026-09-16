@@ -346,8 +346,8 @@ struct Watch: ParsableCommand {
     @Option(name: .shortAndLong, help: "Profile: silent, balanced, performance, max")
     var profile: String = "balanced"
 
-    @Option(name: .shortAndLong, help: "Poll interval in seconds (default 0.1 = 100ms)")
-    var interval: Double = 0.1
+    @Option(name: .shortAndLong, help: "Poll interval in seconds (default 0.2 = 200ms)")
+    var interval: Double = Double(ThermalMonitor.defaultTickInterval)
 
     @Flag(name: .long, help: "Output JSON on each update")
     var json: Bool = false
@@ -362,7 +362,8 @@ struct Watch: ParsableCommand {
         }
 
         let fc = try FanControl()
-        let monitor = ThermalMonitor(fanControl: fc, profile: selectedProfile)
+        let monitor = ThermalMonitor(fanControl: fc, profile: selectedProfile,
+                                     tickInterval: Float(interval))
 
         print("ThermalForge watch — profile: \(selectedProfile.name)")
         print("Hardware: \(fc.hardwareInfo)")
@@ -416,7 +417,7 @@ struct Watch: ParsableCommand {
             Darwin.exit(0)
         }
 
-        monitor.start(interval: interval)
+        monitor.start()
 
         // Keep the process alive
         RunLoop.main.run()
