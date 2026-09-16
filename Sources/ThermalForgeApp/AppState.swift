@@ -351,14 +351,20 @@ final class AppState: ObservableObject {
         // carrying the previous profile could land after a click and revert the selection.
         monitor.onUpdate = { [weak self] status, _, state in
             Task { @MainActor [weak self] in
-                self?.latestStatus = status
-                self?.monitorState = state
+                guard let self else { return }
+                self.latestStatus = status
+                // The menu bar label redraws the status item on every publish, so only
+                // publish when what it shows changes — not on sub-degree sensor jitter.
+                if self.monitorState != state { self.monitorState = state }
                 // Max of only the displayed sensors
                 // Peak across all CPU and GPU sensors for menu bar display
                 let displayPrefixes = ["TC", "Tp", "TG", "Tg"]
-                self?.maxTemp = status.temperatures
+                let peak = status.temperatures
                     .filter { key, _ in displayPrefixes.contains(where: { key.hasPrefix($0) }) }
                     .values.max()
+                if Self.displayedDegrees(peak) != Self.displayedDegrees(self.maxTemp) {
+                    self.maxTemp = peak
+                }
             }
         }
         monitor.onFanCommand = { [weak self] command in
@@ -377,6 +383,12 @@ final class AppState: ObservableObject {
         }
         monitor.start()
         self.monitor = monitor
+    }
+
+    /// The whole degrees `MenuBarLabel` shows for `tempC`, in both units, so a stored
+    /// peak is never stale in whichever unit the user switches to.
+    private static func displayedDegrees(_ tempC: Float?) -> [Int]? {
+        tempC.map { [Int($0), Int($0 * 9 / 5 + 32)] }
     }
 
     // MARK: - Actions
