@@ -73,6 +73,42 @@ struct RollingAverage {
     }
 }
 
+// MARK: - Fan Ramp
+
+/// The fan fraction the monitor has applied, moved toward each tick's target at the
+/// profile's ramp rates. `step` returns the RPM to send, floored at the fan's minimum.
+/// Below the floor every step maps to the same RPM, so only the first one is sent.
+struct FanRamp {
+    private(set) var appliedPercent: Float = 0
+    /// The last RPM `step` returned; nil after a reset, so the next step always sends.
+    private var sentRPM: Float?
+
+    /// Step toward `target` (0–1) by at most `up`/`down` per tick (`instant` skips the
+    /// up governor). Returns the RPM to send, or nil when nothing needs sending.
+    mutating func step(toward target: Float, up: Float, down: Float, instant: Bool,
+                       minRPM: Float, maxRPM: Float) -> Float? {
+        var percent = target
+        if percent > appliedPercent {
+            if !instant { percent = min(percent, appliedPercent + up) }
+        } else if percent < appliedPercent {
+            percent = max(percent, appliedPercent - down)
+        }
+        guard abs(percent - appliedPercent) > 0.002 else { return nil }
+        appliedPercent = percent
+        // Whole RPM: `minRPM / maxRPM × maxRPM` can land a hair above minRPM and resend it.
+        let rpm = max(maxRPM * percent, minRPM).rounded()
+        guard rpm != sentRPM else { return nil }
+        sentRPM = rpm
+        return rpm
+    }
+
+    /// Record a fan state set outside `step`: 0 when fans go back to macOS, 1 at max.
+    mutating func reset(to percent: Float) {
+        appliedPercent = percent
+        sentRPM = nil
+    }
+}
+
 /// Median of the most recent `capacity` samples. Used for anomaly logging: a per-core
 /// blip shorter than half the window vanishes, while a real step keeps its full size.
 struct RollingMedian {
@@ -176,7 +212,7 @@ public final class ThermalMonitor {
 
     // MARK: - Fan State
 
-    private var lastAppliedRPMPercent: Float = 0
+    private var fanRamp = FanRamp()
     private var fansCurrentlyRunning = false
     private var sustainedAboveCount = 0
     /// Consecutive ticks skipped for an implausible peak (see `FanProfile.isPlausibleTemp`).
@@ -273,7 +309,7 @@ public final class ThermalMonitor {
     public func switchProfile(_ profile: FanProfile) {
         queue.async { [self] in
             activeProfile = profile
-            lastAppliedRPMPercent = 0
+            fanRamp.reset(to: 0)
             fansCurrentlyRunning = false
             sustainedAboveCount = 0
             tickCounter = 0
@@ -355,7 +391,7 @@ public final class ThermalMonitor {
                 applyCommand(.setMax)
                 state = .safetyOverride
                 fansCurrentlyRunning = true
-                lastAppliedRPMPercent = 1.0
+                fanRamp.reset(to: 1)
                 TFLogger.shared.safety("Override triggered: \(String(format: "%.1f", maxTemp))°C — fans maxed")
             }
             if tickCounter % uiUpdateCadence == 0 {
@@ -482,7 +518,7 @@ public final class ThermalMonitor {
         // Below stop threshold and fans running: turn off (with hysteresis)
         if peakTemp < curve.stopTemp && fansCurrentlyRunning && rateOfChange() <= 0 {
             applyCommand(.resetAuto)
-            lastAppliedRPMPercent = 0
+            fanRamp.reset(to: 0)
             fansCurrentlyRunning = false
             state = .idle
             TFLogger.shared.fan("\(name) fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(curve.stopTemp))°C")
@@ -515,22 +551,14 @@ public final class ThermalMonitor {
         let rampUp = curve.rampUpPerSec * tickInterval
         let rampDown = curve.rampDownPerSec * tickInterval
 
-        if targetPct > lastAppliedRPMPercent {
-            targetPct = min(targetPct, lastAppliedRPMPercent + rampUp)
-        } else if targetPct < lastAppliedRPMPercent {
-            targetPct = max(targetPct, lastAppliedRPMPercent - rampDown)
-        }
-
-        // Apply if changed meaningfully (threshold scaled for 100ms ticks)
-        if abs(targetPct - lastAppliedRPMPercent) > 0.002 {
-            let targetRPM = max(maxRPM * targetPct, minRPM)
+        if let targetRPM = fanRamp.step(toward: targetPct, up: rampUp, down: rampDown, instant: false,
+                                        minRPM: minRPM, maxRPM: maxRPM) {
             applyCommand(.setRPM(targetRPM))
 
             if !fansCurrentlyRunning {
                 TFLogger.shared.fan("\(name) fans on: \(Int(targetRPM)) RPM at \(String(format: "%.1f", peakTemp))°C")
             }
 
-            lastAppliedRPMPercent = targetPct
             fansCurrentlyRunning = true
             state = .active(profileName: name)
         } else if fansCurrentlyRunning {
@@ -561,7 +589,7 @@ public final class ThermalMonitor {
             if fansCurrentlyRunning {
                 applyCommand(.resetAuto)
                 fansCurrentlyRunning = false
-                lastAppliedRPMPercent = 0
+                fanRamp.reset(to: 0)
                 state = .idle
             }
             return
@@ -573,7 +601,7 @@ public final class ThermalMonitor {
             if fansCurrentlyRunning {
                 applyCommand(.resetAuto)
                 fansCurrentlyRunning = false
-                lastAppliedRPMPercent = 0
+                fanRamp.reset(to: 0)
                 state = .idle
                 TFLogger.shared.fan("Fans off: \(String(format: "%.1f", peakTemp))°C below \(Int(curve.stopTemp))°C [\(activeProfile.name)]")
             }
@@ -600,27 +628,15 @@ public final class ThermalMonitor {
         let rampUp = curve.rampUpPerSec * tickInterval
         let rampDown = curve.rampDownPerSec * tickInterval
 
-        if targetPct > lastAppliedRPMPercent {
-            if !curve.instantEngage {
-                // Governed ramp-up
-                targetPct = min(targetPct, lastAppliedRPMPercent + rampUp)
-            }
-            // instantEngage: skip governor, jump directly to target
-        } else if targetPct < lastAppliedRPMPercent {
-            // Ramp-down governor always applies (even for instantEngage profiles)
-            targetPct = max(targetPct, lastAppliedRPMPercent - rampDown)
-        }
-
-        // Apply if changed meaningfully (threshold scaled for 100ms ticks)
-        if abs(targetPct - lastAppliedRPMPercent) > 0.002 {
-            let targetRPM = max(maxRPM * targetPct, minRPM)
+        // instantEngage skips the up governor; the down governor always applies.
+        if let targetRPM = fanRamp.step(toward: targetPct, up: rampUp, down: rampDown,
+                                        instant: curve.instantEngage, minRPM: minRPM, maxRPM: maxRPM) {
             applyCommand(.setRPM(targetRPM))
 
             if !fansCurrentlyRunning {
                 TFLogger.shared.fan("Fans on: \(Int(targetRPM)) RPM at \(String(format: "%.1f", peakTemp))°C [\(activeProfile.name)]")
             }
 
-            lastAppliedRPMPercent = targetPct
             fansCurrentlyRunning = true
             state = .active(profileName: activeProfile.name)
         } else if fansCurrentlyRunning {
