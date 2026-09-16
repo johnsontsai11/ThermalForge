@@ -53,6 +53,8 @@ final class AppState: ObservableObject {
     private var monitor: ThermalMonitor?
     /// Every monitor reading, published to `latestStatus` only while the menu is open.
     private var newestStatus: ThermalStatus?
+    /// The label's 10 s average: 10 samples at the monitor's once-a-second onUpdate.
+    private var menuBarTemperature = MenuBarTemperature(samples: 10)
     private var isMenuOpen = false
     private let executor = PrivilegedExecutor()
     private var heartbeatTimer: DispatchSourceTimer?
@@ -357,7 +359,7 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 // Every publish re-renders the menu bar label and status item (~2.5% CPU
                 // at 2 updates/s), so publish only what's on screen: the full status while
-                // the menu is open, and the label only when its icon or degrees change.
+                // the menu is open, and the label only when its icon or averaged degrees change.
                 self.newestStatus = status
                 if self.isMenuOpen { self.latestStatus = status }
                 if self.monitorState != state { self.monitorState = state }
@@ -367,8 +369,8 @@ final class AppState: ObservableObject {
                 let peak = status.temperatures
                     .filter { key, _ in displayPrefixes.contains(where: { key.hasPrefix($0) }) }
                     .values.max()
-                if Self.displayedDegrees(peak) != Self.displayedDegrees(self.maxTemp) {
-                    self.maxTemp = peak
+                if let peak, let shown = self.menuBarTemperature.add(peak) {
+                    self.maxTemp = shown
                 }
             }
         }
@@ -398,12 +400,6 @@ final class AppState: ObservableObject {
 
     func menuDidClose() {
         isMenuOpen = false
-    }
-
-    /// The whole degrees `MenuBarLabel` shows for `tempC`, in both units, so a stored
-    /// peak is never stale in whichever unit the user switches to.
-    private static func displayedDegrees(_ tempC: Float?) -> [Int]? {
-        tempC.map { [Int($0), Int($0 * 9 / 5 + 32)] }
     }
 
     // MARK: - Actions
