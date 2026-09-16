@@ -66,7 +66,19 @@ struct MenuBarLabel: View {
     var fahrenheit: Bool = false
     var needsDaemonUpdate: Bool = false
 
+    /// The whole label as one template image. The menu bar redraws a label's Text in its own
+    /// proportional font (ignoring `.monospaced` and `.monospacedDigit()`), so "61°" was 2 pt
+    /// narrower than "62°" and each such change shifted every item to its left. It also takes
+    /// only one image from a label, so icon and degrees are rendered together.
     var body: some View {
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        let image = renderer.nsImage ?? NSImage()
+        image.isTemplate = true // tinted by the menu bar for light and dark
+        return Image(nsImage: image)
+    }
+
+    private var content: some View {
         HStack(spacing: 3) {
             Image(systemName: iconName)
                 .overlay(alignment: .topTrailing) {
@@ -82,9 +94,11 @@ struct MenuBarLabel: View {
             if let tempC = maxTemp {
                 let display = fahrenheit ? tempC * 9 / 5 + 32 : tempC
                 Text("\(Int(display))°")
-                    .font(.system(.caption, design: .monospaced))
             }
         }
+        // The size and font the menu bar drew the old Text label and symbol in, with
+        // fixed-width digits so every two-digit reading is the same width.
+        .font(.system(size: NSFont.menuBarFont(ofSize: 0).pointSize).monospacedDigit())
     }
 
     private var iconName: String {
