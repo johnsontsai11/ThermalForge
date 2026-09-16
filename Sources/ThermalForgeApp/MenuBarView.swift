@@ -181,6 +181,8 @@ struct MenuBarView: View {
             .padding(.bottom, 10)
         }
         .frame(width: 260)
+        .onAppear { appState.menuDidOpen() }
+        .onDisappear { appState.menuDidClose() }
     }
 
     // MARK: - Helpers

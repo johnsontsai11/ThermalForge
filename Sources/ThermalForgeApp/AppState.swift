@@ -51,6 +51,9 @@ final class AppState: ObservableObject {
     @Published var availableUpdate: AvailableUpdate?
 
     private var monitor: ThermalMonitor?
+    /// Every monitor reading, published to `latestStatus` only while the menu is open.
+    private var newestStatus: ThermalStatus?
+    private var isMenuOpen = false
     private let executor = PrivilegedExecutor()
     private var heartbeatTimer: DispatchSourceTimer?
     /// Consecutive failed heartbeats, for debouncing `daemonUnreachable`.
@@ -351,14 +354,22 @@ final class AppState: ObservableObject {
         // carrying the previous profile could land after a click and revert the selection.
         monitor.onUpdate = { [weak self] status, _, state in
             Task { @MainActor [weak self] in
-                self?.latestStatus = status
-                self?.monitorState = state
+                guard let self else { return }
+                // Every publish re-renders the menu bar label and status item (~2.5% CPU
+                // at 2 updates/s), so publish only what's on screen: the full status while
+                // the menu is open, and the label only when its icon or degrees change.
+                self.newestStatus = status
+                if self.isMenuOpen { self.latestStatus = status }
+                if self.monitorState != state { self.monitorState = state }
                 // Max of only the displayed sensors
                 // Peak across all CPU and GPU sensors for menu bar display
                 let displayPrefixes = ["TC", "Tp", "TG", "Tg"]
-                self?.maxTemp = status.temperatures
+                let peak = status.temperatures
                     .filter { key, _ in displayPrefixes.contains(where: { key.hasPrefix($0) }) }
                     .values.max()
+                if Self.displayedDegrees(peak) != Self.displayedDegrees(self.maxTemp) {
+                    self.maxTemp = peak
+                }
             }
         }
         monitor.onFanCommand = { [weak self] command in
@@ -377,6 +388,22 @@ final class AppState: ObservableObject {
         }
         monitor.start()
         self.monitor = monitor
+    }
+
+    /// The menu shows the newest reading the moment it opens, then live updates.
+    func menuDidOpen() {
+        isMenuOpen = true
+        latestStatus = newestStatus
+    }
+
+    func menuDidClose() {
+        isMenuOpen = false
+    }
+
+    /// The whole degrees `MenuBarLabel` shows for `tempC`, in both units, so a stored
+    /// peak is never stale in whichever unit the user switches to.
+    private static func displayedDegrees(_ tempC: Float?) -> [Int]? {
+        tempC.map { [Int($0), Int($0 * 9 / 5 + 32)] }
     }
 
     // MARK: - Actions
