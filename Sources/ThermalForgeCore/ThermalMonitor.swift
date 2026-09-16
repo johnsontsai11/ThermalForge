@@ -156,9 +156,9 @@ public final class ThermalMonitor {
 
     /// Monitor work: process capture, anomaly detection, history logging.
     private static let monitorIntervalSec: Float = 2
-    /// onUpdate cadence — smooth UI without excessive redraws. A whole number of
-    /// default ticks (3 × 200ms), so it isn't rounded to a different interval.
-    private static let uiUpdateIntervalSec: Float = 0.6
+    /// onUpdate cadence. The SMC refreshes temperatures about once a second, so a
+    /// faster UI only redraws the same readings. 5 × the 200ms default tick.
+    private static let uiUpdateIntervalSec: Float = 1
     /// Window for the anomaly median (see `anomalyMedian`).
     private static let anomalyMedianSec: Float = 6
 

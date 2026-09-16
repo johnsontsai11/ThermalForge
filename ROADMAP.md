@@ -61,7 +61,7 @@ Thermal polling runs at 200ms for smooth fan transitions (100ms, matching Apple'
 |---|---|---|
 | **Thermal tick** | 200ms | Read temps, calculate curve, apply ramp governor, write fan speed |
 | **Monitor tick** | 2 seconds (every 10th tick) | Process capture (sysctl), anomaly detection, temp history for Smart |
-| **UI update** | 600ms (every 3rd tick) | Push status to SwiftUI menu bar |
+| **UI update** | 1 second (every 5th tick) | Push status to SwiftUI menu bar |
 
 ### Profile curve design
 
