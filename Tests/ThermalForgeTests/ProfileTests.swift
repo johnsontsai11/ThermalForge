@@ -332,4 +332,20 @@ struct ProfileTests {
         #expect(FanProfile.isPlausibleTemp(40))
         #expect(FanProfile.isPlausibleTemp(FanProfile.safetyTempThreshold))
     }
+
+    // MARK: - Profile switching
+
+    @Test("Switching between fan-controlling profiles keeps the fan state")
+    func switchKeepsFansBetweenControllingProfiles() {
+        #expect(FanProfile.switchKeepsFans(from: .balanced, to: .smart, tookHold: false))
+        #expect(FanProfile.switchKeepsFans(from: .smart, to: .performance, tookHold: false))
+        #expect(FanProfile.switchKeepsFans(from: .performance, to: .max, tookHold: false))
+    }
+
+    @Test("Switching to or from Silent, or over a CLI hold, starts fresh")
+    func switchStartsFresh() {
+        #expect(!FanProfile.switchKeepsFans(from: .silent, to: .smart, tookHold: false))
+        #expect(!FanProfile.switchKeepsFans(from: .balanced, to: .silent, tookHold: false))
+        #expect(!FanProfile.switchKeepsFans(from: .balanced, to: .smart, tookHold: true))
+    }
 }

@@ -427,9 +427,10 @@ final class AppState: ObservableObject {
     func selectSmart(_ profile: FanProfile) {
         guard profile == .smart else { return selectProfile(profile) }
         let took = seizeControl()
+        let keepFans = FanProfile.switchKeepsFans(from: activeProfile, to: .smart, tookHold: took)
         activeProfile = .smart
         persistSelectedProfile(FanProfile.smart.id)
-        monitor?.switchProfile(.smart)
+        monitor?.switchProfile(.smart, keepFans: keepFans)
         // Taking over a CLI hold: clear it so the unsupervised hold isn't
         // orphaned; the Smart tick then establishes supervised control. Off-main
         // one-shot on the pump (never coalesced/reordered).
@@ -466,16 +467,18 @@ final class AppState: ObservableObject {
 
     func selectProfile(_ profile: FanProfile) {
         let took = seizeControl()
+        let keepFans = FanProfile.switchKeepsFans(from: activeProfile, to: profile, tookHold: took)
         activeProfile = profile
         persistSelectedProfile(profile.id)
-        monitor?.switchProfile(profile)
+        monitor?.switchProfile(profile, keepFans: keepFans)
         TFLogger.shared.profile("Selected: \(profile.name)")
 
         // Reset to auto when switching to a hands-off profile, OR when taking over
         // a CLI hold (so its unsupervised hold isn't orphaned). Otherwise active
-        // profiles let tick() ramp from the current temperature. Off-main one-shot
-        // on the pump (never coalesced/reordered).
-        if profile.curve.handsOff || profile.curve.adaptive != nil || profile.id == "silent" || took {
+        // profiles let tick() ramp from the current temperature. A switch that keeps
+        // the fans must not reset, or the monitor's kept speed wouldn't match the fan.
+        // Off-main one-shot on the pump (never coalesced/reordered).
+        if !keepFans && (profile.curve.handsOff || profile.curve.adaptive != nil || profile.id == "silent" || took) {
             commandPump.submit(.resetAuto)
         }
     }

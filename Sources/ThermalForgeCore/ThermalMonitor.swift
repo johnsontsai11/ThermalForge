@@ -305,13 +305,18 @@ public final class ThermalMonitor {
         timer = nil
     }
 
-    /// Update the active profile.
-    public func switchProfile(_ profile: FanProfile) {
+    /// Update the active profile. `keepFans` (see `FanProfile.switchKeepsFans`) carries
+    /// the fan speed and sustained-heat count over; otherwise the new profile starts
+    /// from fans off, as after a reset to auto.
+    public func switchProfile(_ profile: FanProfile, keepFans: Bool = false) {
         queue.async { [self] in
             activeProfile = profile
-            fanRamp.reset(to: 0)
-            fansCurrentlyRunning = false
-            sustainedAboveCount = 0
+            if !keepFans {
+                fanRamp.reset(to: 0)
+                fansCurrentlyRunning = false
+                sustainedAboveCount = 0
+                state = .idle
+            }
             tickCounter = 0
             controlTempAverage = makeControlTempAverage(for: profile)
 
@@ -326,8 +331,6 @@ public final class ThermalMonitor {
                     calibration = loaded
                 }
             }
-
-            state = .idle
         }
     }
 

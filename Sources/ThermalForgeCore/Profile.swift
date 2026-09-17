@@ -303,6 +303,14 @@ extension FanProfile {
         let last = selectable(id: lastID, among: profiles)
         return last.isSmart ? last : .smart
     }
+
+    /// Whether switching `from` → `to` keeps the fan's current speed and sustained-heat
+    /// count, so the new profile picks up where the old one was instead of handing the
+    /// fan back to macOS and re-waiting its trigger. Only between profiles that both
+    /// control the fan, and never when taking over a CLI hold (that hold gets cleared).
+    public static func switchKeepsFans(from: FanProfile, to: FanProfile, tookHold: Bool) -> Bool {
+        !tookHold && !from.curve.handsOff && !to.curve.handsOff
+    }
 }
 
 // MARK: - Persistence
