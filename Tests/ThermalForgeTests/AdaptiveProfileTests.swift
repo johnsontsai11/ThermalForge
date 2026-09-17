@@ -190,4 +190,28 @@ struct AdaptiveProfileTests {
         #expect(decoded.curve.adaptive == nil)
         #expect(decoded.validationError == nil)
     }
+    // MARK: - Smart button
+
+    @Test("Adaptive profiles are Smart; the other built-ins are not")
+    func smartProfiles() {
+        #expect(FanProfile.smart.isSmart)
+        #expect(profile(id: "test_smart_variant").isSmart)
+        #expect(!FanProfile.builtIn.contains { $0.isSmart })
+    }
+
+    @Test("The Smart button turns on the last Smart profile used, else built-in Smart")
+    func smartButtonProfile() {
+        let variant = profile(id: "test_smart_variant")
+        let profiles = FanProfile.builtIn + [variant]
+        #expect(FanProfile.smartButtonProfile(lastID: variant.id, among: profiles) == variant)
+        #expect(FanProfile.smartButtonProfile(lastID: nil, among: profiles) == .smart)
+        #expect(FanProfile.smartButtonProfile(lastID: "test_deleted", among: profiles) == .smart)
+        #expect(FanProfile.smartButtonProfile(lastID: "balanced", among: profiles) == .smart)
+    }
+    @Test("The Smart dropdown lists built-in Smart first, then custom Smart profiles")
+    func smartDropdownProfiles() {
+        let variant = profile(id: "test_smart_variant")
+        let profiles = FanProfile.builtIn + [variant]
+        #expect(FanProfile.smartProfiles(among: profiles) == [.smart, variant])
+    }
 }

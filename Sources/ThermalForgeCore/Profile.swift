@@ -288,6 +288,21 @@ extension FanProfile {
         guard let id else { return .silent }
         return (profiles + [smart]).first { $0.id == id } ?? .silent
     }
+
+    /// Smart-type profiles (built-in Smart and custom adaptive ones) light the menu's Smart button.
+    public var isSmart: Bool { curve.adaptive != nil }
+
+    /// The Smart button's dropdown: built-in Smart, then the Smart profiles in `profiles`.
+    public static func smartProfiles(among profiles: [FanProfile] = loadAll()) -> [FanProfile] {
+        [smart] + profiles.filter(\.isSmart)
+    }
+
+    /// The profile the Smart button turns on: the last Smart profile used, or built-in Smart
+    /// when none is saved or it no longer exists.
+    public static func smartButtonProfile(lastID: String?, among profiles: [FanProfile] = loadAll()) -> FanProfile {
+        let last = selectable(id: lastID, among: profiles)
+        return last.isSmart ? last : .smart
+    }
 }
 
 // MARK: - Persistence

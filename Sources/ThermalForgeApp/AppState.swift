@@ -414,7 +414,18 @@ final class AppState: ObservableObject {
         return had
     }
 
+    /// Every Smart profile, for the Smart button's dropdown.
+    var smartProfiles: [FanProfile] { FanProfile.smartProfiles(among: availableProfiles) }
+
+    /// Turns on the last Smart profile used (built-in Smart until another is chosen).
     func setSmart() {
+        let lastID = UserDefaults.standard.string(forKey: Self.lastSmartProfileKey)
+        selectSmart(FanProfile.smartButtonProfile(lastID: lastID, among: availableProfiles))
+    }
+
+    /// Turns on a Smart profile picked from the Smart button or its dropdown.
+    func selectSmart(_ profile: FanProfile) {
+        guard profile == .smart else { return selectProfile(profile) }
         let took = seizeControl()
         activeProfile = .smart
         persistSelectedProfile(FanProfile.smart.id)
@@ -477,8 +488,14 @@ final class AppState: ObservableObject {
     /// or on watchdog / thermal-floor / crash-recovery fan resets.
     private static let selectedProfileKey = "selectedProfile"
 
+    /// The last Smart profile the user chose, which the Smart button turns back on.
+    private static let lastSmartProfileKey = "lastSmartProfile"
+
     private func persistSelectedProfile(_ id: String) {
         UserDefaults.standard.set(id, forKey: Self.selectedProfileKey)
+        if FanProfile.selectable(id: id, among: availableProfiles).isSmart {
+            UserDefaults.standard.set(id, forKey: Self.lastSmartProfileKey)
+        }
     }
 
     /// The profile to restore at launch: the persisted choice resolved against the known

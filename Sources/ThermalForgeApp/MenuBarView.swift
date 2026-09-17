@@ -99,7 +99,8 @@ struct MenuBarView: View {
                     }
                 }
             )) {
-                ForEach(appState.availableProfiles) { profile in
+                // Smart profiles are picked from the Smart button's dropdown instead.
+                ForEach(appState.availableProfiles.filter { !$0.isSmart }) { profile in
                     HStack {
                         Text(profile.name)
                         Spacer()
@@ -134,26 +135,7 @@ struct MenuBarView: View {
 
             // Quick actions
             HStack(spacing: 8) {
-                // Toggle-as-button holds the system fill while Smart is the active
-                // profile — Apple draws it, it honors .tint, and it adapts to light/dark.
-                Toggle(isOn: Binding(
-                    get: { appState.activeProfile.id == "smart" },
-                    set: { isOn in
-                        if isOn {
-                            appState.setSmart()
-                        } else {
-                            // Turning Smart off returns fans to Apple's default (Silent),
-                            // same as the Default button. Required so the toggle can turn
-                            // off at all — otherwise `get` stays true and snaps it back on.
-                            appState.resetAuto()
-                        }
-                    }
-                )) {
-                    Label("Smart", systemImage: "fan.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .toggleStyle(.button)
-                .tint(.orange)
+                smartButton
 
                 Button(action: { appState.resetAuto() }) {
                     Label("Default", systemImage: "arrow.counterclockwise")
@@ -186,6 +168,57 @@ struct MenuBarView: View {
     }
 
     // MARK: - Helpers
+
+    /// Smart and its profile dropdown as one button. Clicking Smart turns on the last Smart
+    /// profile used, or returns fans to Apple's default (Silent) while one is active; the
+    /// arrow inside its right edge lists the Smart profiles, checkmarking the active one.
+    /// A toggle draws the orange fill while Smart is active (a pull-down Menu ignores it).
+    private var smartButton: some View {
+        Toggle(isOn: Binding(
+            get: { appState.activeProfile.isSmart },
+            set: { isOn in
+                if isOn {
+                    appState.setSmart()
+                } else {
+                    // Required so the toggle can turn off at all — otherwise `get`
+                    // stays true and snaps it back on.
+                    appState.resetAuto()
+                }
+            }
+        )) {
+            Label("Smart", systemImage: "fan.fill")
+                .frame(maxWidth: .infinity)
+                .padding(.trailing, 14) // room for the arrow
+        }
+        .toggleStyle(.button)
+        .tint(.orange)
+        .overlay(alignment: .trailing) {
+            Menu {
+                Picker("Smart profile", selection: Binding(
+                    get: { appState.activeProfile.id },
+                    set: { id in
+                        if let profile = appState.smartProfiles.first(where: { $0.id == id }) {
+                            appState.selectSmart(profile)
+                        }
+                    }
+                )) {
+                    ForEach(appState.smartProfiles) { profile in
+                        Text(profile.name).tag(profile.id)
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } label: {
+                Image(systemName: "chevron.down")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .padding(.trailing, 6)
+            .help("Choose a Smart profile")
+            .accessibilityLabel("Smart profiles")
+        }
+    }
 
     @ViewBuilder
     private var stateIndicator: some View {
