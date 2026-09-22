@@ -73,6 +73,43 @@ struct RollingAverage {
     }
 }
 
+// MARK: - Process History Throttle
+
+/// Rate-limits the rolling process-buffer dump that follows a detected spike.
+///
+/// The buffer holds ~30 s of samples and every spike dumped all of it, but this machine
+/// spikes every few seconds at idle, so consecutive dumps repeated 14 of their 15 lines.
+/// That made the dump ~94% of the app log (≈9.7 MB and 60k lines a day) and buried the
+/// ~120 `[FAN]` lines that are actually tuned against. Spike DETECTION is unchanged and
+/// every spike is still logged as its own line — only the buffer dump is throttled.
+struct ProcessHistoryThrottle {
+    enum Decision: Equatable {
+        /// Dump the buffer; `suppressedSinceLastDump` spikes were hidden since the last one.
+        case dump(suppressedSinceLastDump: Int)
+        case suppress
+    }
+
+    let cooldown: TimeInterval
+    private var lastDump: Date?
+    private var suppressed = 0
+
+    init(cooldown: TimeInterval) { self.cooldown = cooldown }
+
+    /// Record a detected spike and decide whether its buffer should be dumped.
+    mutating func record(at now: Date) -> Decision {
+        if let last = lastDump, now.timeIntervalSince(last) < cooldown {
+            // Covers a backwards clock too: a negative interval is < cooldown, so it
+            // suppresses rather than being read as "the cooldown elapsed".
+            suppressed += 1
+            return .suppress
+        }
+        let hidden = suppressed
+        suppressed = 0
+        lastDump = now
+        return .dump(suppressedSinceLastDump: hidden)
+    }
+}
+
 // MARK: - Fan Ramp
 
 /// The fan fraction the monitor has applied, moved toward each tick's target at the
@@ -185,6 +222,9 @@ public final class ThermalMonitor {
     /// Each tick is one SMC sweep, and those reads dominate the monitor's CPU cost,
     /// so this is the one knob trading CPU for control resolution.
     private let tickInterval: Float
+    /// Throttles the post-spike process dump. 5 minutes keeps forensics for a real
+    /// thermal event while cutting the idle-spike repetition that dominated the log.
+    private var historyThrottle = ProcessHistoryThrottle(cooldown: 300)
 
     /// Default thermal tick. Ramp governors move the fan ~20 RPM per tick and the
     /// shortest sustained trigger is seconds long, so polling finer buys no control.
@@ -486,11 +526,19 @@ public final class ThermalMonitor {
                 }
             }
 
-            // Dump the rolling buffer on any spike — shows what was running BEFORE
+            // Dump the rolling buffer on a spike — shows what was running BEFORE.
+            // Throttled: the buffer barely advances between spikes seconds apart, so
+            // dumping every one repeated almost the same 15 lines and drowned the log.
             if spikeDetected {
-                TFLogger.shared.info("Pre-spike process history (last \(processBuffer.count * 2)s):")
-                for entry in processBuffer {
-                    TFLogger.shared.info("  \(entry.timestamp): \(entry.processes)")
+                switch historyThrottle.record(at: Date()) {
+                case .dump(let hidden):
+                    let since = hidden > 0 ? " — \(hidden) further spike\(hidden == 1 ? "" : "s") since the last dump" : ""
+                    TFLogger.shared.info("Pre-spike process history (last \(processBuffer.count * 2)s)\(since):")
+                    for entry in processBuffer {
+                        TFLogger.shared.info("  \(entry.timestamp): \(entry.processes)")
+                    }
+                case .suppress:
+                    break
                 }
             }
         }
