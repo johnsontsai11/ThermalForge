@@ -178,6 +178,7 @@ final class AppState: ObservableObject {
                     // is live — an edit made since the last launch is NOT in effect, and
                     // without this the log can't distinguish the two.
                     TFLogger.shared.profile("Restored: \(restored.name) — \(restored.curveSummary)")
+                    self.recordActiveProfile(restored)
                 }
                 // Ordering gate: only now that adopt has applied the launch state
                 // do we start the heartbeat. This makes adopt's externalHold write
@@ -440,6 +441,7 @@ final class AppState: ObservableObject {
         // orphaned; the Smart tick then establishes supervised control. Off-main
         // one-shot on the pump (never coalesced/reordered).
         if took { commandPump.submit(.resetAuto) }
+        recordActiveProfile(.smart)
         TFLogger.shared.profile("Smart activated")
     }
 
@@ -465,6 +467,7 @@ final class AppState: ObservableObject {
                 // here, on the daemon-confirmed success path, never on a failed reset.
                 self.persistSelectedProfile(FanProfile.silent.id)
                 self.monitor?.switchProfile(.silent)
+                self.recordActiveProfile(.silent)
                 TFLogger.shared.profile("Reset to Default (Silent (Apple Default))")
             }
         }
@@ -476,6 +479,7 @@ final class AppState: ObservableObject {
         activeProfile = profile
         persistSelectedProfile(profile.id)
         monitor?.switchProfile(profile, keepFans: keepFans)
+        recordActiveProfile(profile)
         TFLogger.shared.profile("Selected: \(profile.name)")
 
         // Reset to auto when switching to a hands-off profile, OR when taking over
@@ -503,6 +507,19 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(id, forKey: Self.selectedProfileKey)
         if FanProfile.selectable(id: id, among: availableProfiles).isSmart {
             UserDefaults.standard.set(id, forKey: Self.lastSmartProfileKey)
+        }
+    }
+
+    /// Publish the profile the app is now running to the sidecar, so `thermalforge log`
+    /// can stamp a capture with what produced it. Called at every deliberate profile
+    /// change — never from the monitor's per-tick echo of `activeProfile`, which would
+    /// rewrite the file every tick. Best-effort: a failure here must not affect fan
+    /// control, so it is logged and swallowed.
+    private func recordActiveProfile(_ profile: FanProfile) {
+        do {
+            try ActiveProfileRecord(profile: profile).write()
+        } catch {
+            TFLogger.shared.error("Could not write active-profile record: \(error.localizedDescription)")
         }
     }
 

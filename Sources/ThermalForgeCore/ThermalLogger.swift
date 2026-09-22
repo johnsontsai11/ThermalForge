@@ -22,6 +22,11 @@ public struct LogSessionMetadata: Codable {
     public var endedAt: String?
     public var totalSamples: Int
     public var sensorKeys: [String]
+    /// The profile the app was running when this capture was taken, so a capture is
+    /// self-describing instead of needing a cross-reference against the app log.
+    public var profile: ActiveProfileRecord?
+    /// Why `profile` is nil, when it is. Never left unexplained.
+    public var profileNote: String?
 
     public init(machine: String, osVersion: String, thermalForgeVersion: String,
                 fanCount: Int, maxRPM: Int, minRPM: Int, sampleRateHz: Double, startedAt: String) {
@@ -35,6 +40,9 @@ public struct LogSessionMetadata: Codable {
         self.startedAt = startedAt
         self.totalSamples = 0
         self.sensorKeys = []
+        let lookup = ActiveProfileRecord.read()
+        self.profile = lookup.record
+        self.profileNote = lookup.note
     }
 }
 
