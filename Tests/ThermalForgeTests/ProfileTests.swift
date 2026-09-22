@@ -27,6 +27,38 @@ struct ProfileTests {
         #expect(FanProfile.selectable(id: nil).id == "silent")
     }
 
+    // MARK: - Curve summary (launch log line)
+
+    @Test("curveSummary names the knobs that change fan behaviour, so a launch log line is self-describing")
+    func curveSummaryReportsLiveTuning() {
+        let quiet = FanProfile(id: "smart-mini-quiet", name: "Smart (Mac mini, quiet)",
+                               curve: .init(stopTemp: 45, startTemp: 60, ceilingTemp: 85,
+                                            maxRPMPercent: 1.0, curveShape: .easeIn,
+                                            sustainedTriggerSec: 6))
+        let s = quiet.curveSummary
+        // The three thresholds that decide when and how hard the fan runs.
+        #expect(s.contains("stop 45"))
+        #expect(s.contains("start 60"))
+        #expect(s.contains("ceiling 85"))
+        // Shape and trigger distinguish two profiles that share thresholds.
+        #expect(s.contains("easeIn"))
+        #expect(s.contains("6"))
+    }
+
+    @Test("curveSummary distinguishes profiles that differ only in ceiling")
+    func curveSummaryDistinguishesCeilings() {
+        let c85 = FanProfile(id: "q", name: "q", curve: .init(stopTemp: 45, startTemp: 60,
+                                                              ceilingTemp: 85, curveShape: .easeIn))
+        let c90 = FanProfile(id: "q", name: "q", curve: .init(stopTemp: 45, startTemp: 60,
+                                                              ceilingTemp: 90, curveShape: .easeIn))
+        #expect(c85.curveSummary != c90.curveSummary)
+    }
+
+    @Test("curveSummary marks a hands-off profile instead of printing meaningless thresholds")
+    func curveSummaryHandsOff() {
+        #expect(FanProfile.silent.curveSummary.contains("hands-off"))
+    }
+
     // MARK: - Built-in Profile Parameters
 
     @Test("Built-in profiles have correct curve parameters")

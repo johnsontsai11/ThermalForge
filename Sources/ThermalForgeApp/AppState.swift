@@ -173,6 +173,11 @@ final class AppState: ObservableObject {
                     let restored = self.restoredProfile()
                     self.activeProfile = restored
                     self.monitor?.switchProfile(restored)
+                    // Log what launch actually restored. Profile JSON is read once here
+                    // (no file watcher), so this line is the only record of which curve
+                    // is live — an edit made since the last launch is NOT in effect, and
+                    // without this the log can't distinguish the two.
+                    TFLogger.shared.profile("Restored: \(restored.name) — \(restored.curveSummary)")
                 }
                 // Ordering gate: only now that adopt has applied the launch state
                 // do we start the heartbeat. This makes adopt's externalHold write

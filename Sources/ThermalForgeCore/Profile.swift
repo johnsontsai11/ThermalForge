@@ -196,6 +196,28 @@ public struct FanProfile: Codable, Identifiable, Equatable {
         }
     }
 
+    /// One-line description of the knobs that actually change fan behaviour, for the
+    /// launch log line. Profile *identity* is the name; this is the live *tuning*, so a
+    /// log reader can tell which curve was running without reading the JSON off disk
+    /// (which may have been edited since the app last loaded it).
+    public var curveSummary: String {
+        if curve.handsOff { return "hands-off (macOS owns the fans)" }
+        let n = { (v: Float) -> String in
+            v == v.rounded() ? String(Int(v)) : String(format: "%.2g", v)
+        }
+        var parts = ["stop \(n(curve.stopTemp))", "start \(n(curve.startTemp))",
+                     "ceiling \(n(curve.ceilingTemp))",
+                     "cap \(Int((curve.maxRPMPercent * 100).rounded()))%",
+                     curve.curveShape.rawValue,
+                     "trigger \(n(curve.sustainedTriggerSec))s"]
+        if let a = curve.adaptive {
+            parts.append("smoothing \(n(a.smoothingSec))s")
+            parts.append("boost \(n(a.rateBoost))")
+            if a.useCalibration { parts.append("calibrated") }
+        }
+        return parts.joined(separator: ", ")
+    }
+
     public init(id: String, name: String, curve: Curve) {
         self.id = id
         self.name = name
