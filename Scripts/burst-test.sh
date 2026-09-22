@@ -12,6 +12,11 @@
 # (same sensors the profiles use) and fan RPM once a second, then prints a summary.
 # The run aborts, and is marked invalid, if the hottest core reaches ABORT_AT (93°C).
 #
+# Not for profile-switch tests: this holds one profile for the whole run, so a mid-run
+# switch just blends into the phase averages. `yes` load also tops out below the band a
+# switch bug shows in, and the 93°C abort fires inside it. Switch by hand and sample
+# `thermalforge status` instead.
+#
 # Durations can be overridden for a quick check, e.g.
 #   BURST_PHASE_SEC=30 SUSTAINED_SEC=10 SETTLE_SEC=10 START_WAIT_SEC=0 Scripts/burst-test.sh smoke
 #
