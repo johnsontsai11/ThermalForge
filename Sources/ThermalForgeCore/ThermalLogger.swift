@@ -25,8 +25,14 @@ public struct LogSessionMetadata: Codable {
     /// The profile the app was running when this capture was taken, so a capture is
     /// self-describing instead of needing a cross-reference against the app log.
     public var profile: ActiveProfileRecord?
-    /// Why `profile` is nil, when it is. Never left unexplained.
+    /// Why `profile` is nil, or why it should not be credited. Never left unexplained.
     public var profileNote: String?
+    /// False whenever anything other than the profile's curve may have driven the fan
+    /// (a CLI hold, the safety floor, or an unreadable daemon). A capture with this
+    /// false is not evidence about the curve. Defaults false — credit is earned.
+    public var profileInControl: Bool
+    /// The fan hold in force during the capture, when one was seen.
+    public var fanHold: DaemonHoldState?
 
     public init(machine: String, osVersion: String, thermalForgeVersion: String,
                 fanCount: Int, maxRPM: Int, minRPM: Int, sampleRateHz: Double, startedAt: String) {
@@ -40,9 +46,7 @@ public struct LogSessionMetadata: Codable {
         self.startedAt = startedAt
         self.totalSamples = 0
         self.sensorKeys = []
-        let lookup = ActiveProfileRecord.read()
-        self.profile = lookup.record
-        self.profileNote = lookup.note
+        self.profileInControl = false
     }
 }
 
@@ -57,6 +61,11 @@ public final class ThermalLogger {
 
     private var csvHandle: FileHandle?
     private var metadata: LogSessionMetadata
+    /// Which profile the app had loaded when the capture began.
+    private let profileLookup: ActiveProfileLookup = ActiveProfileRecord.read()
+    /// The fan hold at the capture's start; nil means the daemon could not be read.
+    /// Sampled again at the end, so a hold left in place across a run is caught.
+    private let holdAtStart: DaemonHoldState? = try? DaemonClient().readState()
     private var sampleCount = 0
     private var running = true
     private let isoFormatter = ISO8601DateFormatter()
@@ -197,6 +206,16 @@ public final class ThermalLogger {
 
         metadata.endedAt = isoFormatter.string(from: Date())
         metadata.totalSamples = sampleCount
+
+        // Attribute the capture only now: crediting the profile needs the hold at BOTH
+        // ends, so a `thermalforge set` left running across the capture is caught.
+        let attribution = ProfileAttribution.resolve(lookup: profileLookup,
+                                                     holdAtStart: holdAtStart,
+                                                     holdAtEnd: try? DaemonClient().readState())
+        metadata.profile = attribution.profile
+        metadata.profileNote = attribution.profileNote
+        metadata.profileInControl = attribution.profileInControl
+        metadata.fanHold = attribution.fanHold
 
         // Write metadata JSON
         let metaPath = outputDir.appendingPathComponent("metadata.json")

@@ -94,3 +94,58 @@ extension ActiveProfileRecord {
         return .found(record)
     }
 }
+
+// MARK: - Capture Attribution
+
+/// Who actually drove the fan for a capture. The sidecar says which profile the app
+/// has LOADED, which is not the same as the profile being in control: a CLI hold
+/// (`thermalforge set …`) suspends the app's automatic control while leaving
+/// `activeProfile` untouched, and the daemon's safety floor can override any hold.
+/// Crediting the curve for fan speeds it didn't command is exactly the mis-attribution
+/// the sidecar exists to prevent, so resolve the two together.
+public struct ProfileAttribution: Equatable {
+    public let profile: ActiveProfileRecord?
+    public let profileNote: String?
+    /// False whenever anything other than the profile's curve may have driven the fan.
+    /// A capture with this false is not evidence about the curve.
+    public let profileInControl: Bool
+    /// The hold in force, when one was seen. Nil when the daemon reported none.
+    public let fanHold: DaemonHoldState?
+
+    /// Holds are sampled at the capture's start and end. A hold that both begins and
+    /// ends strictly inside the window is not detected — the realistic case, a hold
+    /// left in place across a run, is.
+    public static func resolve(lookup: ActiveProfileLookup,
+                               holdAtStart: DaemonHoldState?,
+                               holdAtEnd: DaemonHoldState?) -> ProfileAttribution {
+        let record = lookup.record
+        let samples = [holdAtStart, holdAtEnd]
+
+        // An unreadable daemon is unknown, not "no hold" — don't credit the profile
+        // on the strength of a failed read.
+        if samples.contains(where: { $0 == nil }) {
+            return .init(profile: record,
+                         profileNote: lookup.note ?? "fan hold could not be read (daemon unreachable)",
+                         profileInControl: false,
+                         fanHold: samples.compactMap { $0 }.first { !$0.isEmpty })
+        }
+        let seen = samples.compactMap { $0 }
+
+        guard record != nil else {
+            return .init(profile: nil, profileNote: lookup.note,
+                         profileInControl: false, fanHold: seen.first { !$0.isEmpty })
+        }
+        if let cli = seen.first(where: { $0.isCLIHold }) {
+            return .init(profile: record,
+                         profileNote: "fan held from the CLI (\(cli.command ?? "?")) — the profile was suspended and did not produce this capture",
+                         profileInControl: false, fanHold: cli)
+        }
+        if let suspended = seen.first(where: { $0.safetySuspended }) {
+            return .init(profile: record,
+                         profileNote: "the daemon's safety floor overrode the profile during this capture",
+                         profileInControl: false, fanHold: suspended)
+        }
+        return .init(profile: record, profileNote: lookup.note,
+                     profileInControl: true, fanHold: seen.first { !$0.isEmpty })
+    }
+}
