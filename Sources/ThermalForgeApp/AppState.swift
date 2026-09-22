@@ -64,6 +64,9 @@ final class AppState: ObservableObject {
     /// Runs the 5s heartbeat/version/state polls OFF the main thread so a slow
     /// or hung daemon can never stall the UI run loop (the v0.1.7 freeze).
     private let heartbeatQueue = DispatchQueue(label: "com.thermalforge.heartbeat", qos: .utility)
+    /// Serial, so rapid profile switches land in order and the last switch is the one
+    /// left on disk. Off-main for the same reason as the queues above.
+    private let sidecarQueue = DispatchQueue(label: "com.thermalforge.sidecar", qos: .utility)
     /// Off-main, serial, coalescing pump for all daemon-bound fan writes (launch
     /// adopt + monitor ramp commands). It owns its own queue, so this @MainActor
     /// class never runs socket I/O on the main actor — off-main by construction,
@@ -516,10 +519,19 @@ final class AppState: ObservableObject {
     /// rewrite the file every tick. Best-effort: a failure here must not affect fan
     /// control, so it is logged and swallowed.
     private func recordActiveProfile(_ profile: FanProfile) {
-        do {
-            try ActiveProfileRecord(profile: profile).write()
-        } catch {
-            TFLogger.shared.error("Could not write active-profile record: \(error.localizedDescription)")
+        // Snapshot on the main actor so the record carries the moment of the SWITCH,
+        // then write off it. `Data.write(.atomic)` is a temp-file-plus-rename whose tail
+        // is unbounded on a busy or re-encrypting volume, and this class keeps all other
+        // I/O off the main actor for exactly that reason (see commandPump/heartbeatQueue).
+        // The launch call site runs ahead of startHeartbeat(), so a stalled disk here
+        // would otherwise delay that ordering gate.
+        let record = ActiveProfileRecord(profile: profile)
+        sidecarQueue.async {
+            do {
+                try record.write()
+            } catch {
+                TFLogger.shared.error("Could not write active-profile record: \(error.localizedDescription)")
+            }
         }
     }
 

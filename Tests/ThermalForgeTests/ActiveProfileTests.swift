@@ -8,6 +8,12 @@ import Testing
 
 @testable import ThermalForgeCore
 
+/// Minimal unchecked box: each index is written by exactly one iteration.
+final class UnsafeMutableTransferBox<T>: @unchecked Sendable {
+    var value: T
+    init(_ value: T) { self.value = value }
+}
+
 @Suite("Active profile sidecar")
 struct ActiveProfileTests {
 
@@ -84,6 +90,24 @@ struct ActiveProfileTests {
 
         let r = try #require(ActiveProfileRecord.read(from: url, isAlive: { _ in true }).record)
         #expect(r.id == FanProfile.silent.id)
+    }
+
+    @Test("Records built concurrently all carry a valid timestamp (the shared formatter is safe)")
+    func concurrentRecordCreationIsSafe() {
+        // The ISO formatter is a shared static: it is never mutated after creation, so
+        // concurrent formatting is safe. This guards that, since a per-call formatter
+        // would have made the question moot.
+        let profile = quiet
+        let results = UnsafeMutableTransferBox([String?](repeating: nil, count: 200))
+        DispatchQueue.concurrentPerform(iterations: 200) { i in
+            results.value[i] = ActiveProfileRecord(profile: profile).asOf
+        }
+        let parser = ISO8601DateFormatter()
+        for stamp in results.value {
+            let s = stamp ?? ""
+            #expect(!s.isEmpty)
+            #expect(parser.date(from: s) != nil, "unparseable timestamp: \(s)")
+        }
     }
 
     @Test("The live process counts as alive, so a real app's record is honoured")
