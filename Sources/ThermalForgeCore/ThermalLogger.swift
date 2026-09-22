@@ -48,6 +48,31 @@ public struct LogSessionMetadata: Codable {
         self.sensorKeys = []
         self.profileInControl = false
     }
+
+    // Hand-written so `profile`, `profileNote` and `fanHold` encode as explicit nulls.
+    // The synthesized encoder uses `encodeIfPresent` for Optionals, which drops the key
+    // entirely — a reader then cannot tell an unattributed capture from one written by
+    // a version that predates attribution. Every stored property must appear here;
+    // `LogMetadataEncodingTests.allFieldsAreEncoded` fails if one is forgotten.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(machine, forKey: .machine)
+        try c.encode(osVersion, forKey: .osVersion)
+        try c.encode(thermalForgeVersion, forKey: .thermalForgeVersion)
+        try c.encode(fanCount, forKey: .fanCount)
+        try c.encode(maxRPM, forKey: .maxRPM)
+        try c.encode(minRPM, forKey: .minRPM)
+        try c.encode(sampleRateHz, forKey: .sampleRateHz)
+        try c.encode(startedAt, forKey: .startedAt)
+        try c.encodeIfPresent(endedAt, forKey: .endedAt)
+        try c.encode(totalSamples, forKey: .totalSamples)
+        try c.encode(sensorKeys, forKey: .sensorKeys)
+        // The attribution block is always present, null or not.
+        try c.encode(profile, forKey: .profile)
+        try c.encode(profileNote, forKey: .profileNote)
+        try c.encode(profileInControl, forKey: .profileInControl)
+        try c.encode(fanHold, forKey: .fanHold)
+    }
 }
 
 // MARK: - Thermal Logger

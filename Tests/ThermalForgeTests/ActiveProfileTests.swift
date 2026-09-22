@@ -41,7 +41,6 @@ struct ActiveProfileTests {
         let r = try #require(found.record)
         #expect(r.id == "smart-mini-quiet")
         #expect(r.name == "Smart (Mac mini, quiet)")
-        #expect(r.source == "app")
         #expect(r.curve.ceilingTemp == 85)
         #expect(r.curve.stopTemp == 45)
         #expect(r.curve.curveShape == .easeIn)

@@ -17,9 +17,6 @@ import Foundation
 public struct ActiveProfileRecord: Codable, Equatable {
     public let id: String
     public let name: String
-    /// Where the record came from. Always "app" today; present so a future writer
-    /// (e.g. the daemon) is distinguishable without breaking existing readers.
-    public let source: String
     /// When the app last wrote this record (ISO-8601).
     public let asOf: String
     /// The writing app's pid, so a reader can tell a live record from a leftover one.
@@ -31,11 +28,9 @@ public struct ActiveProfileRecord: Codable, Equatable {
     private static let isoFormatter = ISO8601DateFormatter()
 
     public init(profile: FanProfile, asOf: Date = Date(),
-                pid: Int32 = ProcessInfo.processInfo.processIdentifier,
-                source: String = "app") {
+                pid: Int32 = ProcessInfo.processInfo.processIdentifier) {
         self.id = profile.id
         self.name = profile.name
-        self.source = source
         self.asOf = Self.isoFormatter.string(from: asOf)
         self.pid = pid
         self.curve = profile.curve

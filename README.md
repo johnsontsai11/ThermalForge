@@ -284,7 +284,7 @@ Each session produces a self-contained folder:
 |---|---|
 | **thermal.csv** | Timestamped readings from every detected temperature sensor, fan RPM (actual + target), fan mode, at every sample interval |
 | **processes.csv** | Top 5 processes by CPU utilization at every sample — the missing link between thermal data and what caused it |
-| **metadata.json** | Machine model, chip, OS version, ThermalForge version, fan count, RPM range, sample rate, complete sensor dictionary, session start/end, total sample count |
+| **metadata.json** | Machine model, chip, OS version, ThermalForge version, fan count, RPM range, sample rate, complete sensor dictionary, session start/end, total sample count — plus the fan profile that produced the capture (`profile`: id, name, pid, timestamp and full curve), whether that profile was actually in control (`profileInControl`), the fan hold in force (`fanHold`), and a `profileNote` explaining any of the above that is null |
 
 ### Why this format
 
