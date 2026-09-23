@@ -15,16 +15,21 @@ struct ProfileTests {
 
     @Test("selectable(id:) resolves known profiles, including Smart, and falls back to Silent")
     func selectableResolution() {
+        // Resolution is pure id matching, so pass the built-ins explicitly. Letting the
+        // `among:` default fire would scan the user's real profiles directory on every
+        // call — non-hermetic (a saved profile could shadow an id under test) and it logs
+        // any unreadable file there to the user's real log.
+        let among = FanProfile.builtIn
         // Every built-in resolves to itself.
-        #expect(FanProfile.selectable(id: "silent").id == "silent")
-        #expect(FanProfile.selectable(id: "balanced").id == "balanced")
-        #expect(FanProfile.selectable(id: "performance").id == "performance")
-        #expect(FanProfile.selectable(id: "max").id == "max")
+        #expect(FanProfile.selectable(id: "silent", among: among).id == "silent")
+        #expect(FanProfile.selectable(id: "balanced", among: among).id == "balanced")
+        #expect(FanProfile.selectable(id: "performance", among: among).id == "performance")
+        #expect(FanProfile.selectable(id: "max", among: among).id == "max")
         // Smart resolves even though it isn't in `builtIn`.
-        #expect(FanProfile.selectable(id: "smart").id == "smart")
+        #expect(FanProfile.selectable(id: "smart", among: among).id == "smart")
         // Unknown id (a profile removed in a future version) and nil both fall to Silent.
-        #expect(FanProfile.selectable(id: "does-not-exist").id == "silent")
-        #expect(FanProfile.selectable(id: nil).id == "silent")
+        #expect(FanProfile.selectable(id: "does-not-exist", among: among).id == "silent")
+        #expect(FanProfile.selectable(id: nil, among: among).id == "silent")
     }
 
     // MARK: - Curve summary (launch log line)
@@ -138,9 +143,12 @@ struct ProfileTests {
                                     rampUpPerSec: 0.08, sustainedTriggerSec: 3)
         )
 
-        try custom.save()
+        let profilesDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ThermalForgeTests-\(UUID().uuidString)", isDirectory: true)
+        try custom.save(in: profilesDir)
+        defer { try? FileManager.default.removeItem(at: profilesDir) }
 
-        let loaded = FanProfile.loadAll()
+        let loaded = FanProfile.loadAll(in: profilesDir)
         let found = loaded.first { $0.id == "test_custom" }
         #expect(found != nil)
         #expect(found?.curve.startTemp == 55)
@@ -148,11 +156,6 @@ struct ProfileTests {
         #expect(found?.curve.curveShape == .easeOut)
         #expect(found?.curve.rampUpPerSec == 0.08)
         #expect(found?.curve.sustainedTriggerSec == 3)
-
-        // Clean up
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/profiles/test_custom.json")
-        try? FileManager.default.removeItem(at: path)
     }
 
     @Test("Safety threshold is 95°C")

@@ -338,20 +338,29 @@ extension FanProfile {
 // MARK: - Persistence
 
 extension FanProfile {
-    private static var profilesDirectory: URL {
+    /// Internal, not private: tests drive `save(in:)` / `loadAll(in:)` with a temp directory
+    /// so fixtures never land in the user's real profile folder (and their decode failures
+    /// never reach the user's real log).
+    static var profilesDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/ThermalForge/profiles")
     }
 
     public func save() throws {
-        let dir = Self.profilesDirectory
+        try save(in: Self.profilesDirectory)
+    }
+
+    func save(in dir: URL) throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(self)
         try data.write(to: dir.appendingPathComponent("\(id).json"))
     }
 
     public static func loadAll() -> [FanProfile] {
-        let dir = profilesDirectory
+        loadAll(in: profilesDirectory)
+    }
+
+    static func loadAll(in dir: URL) -> [FanProfile] {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: nil
         ) else {
@@ -363,6 +372,10 @@ extension FanProfile {
             let profile: FanProfile
             do {
                 profile = try JSONDecoder().decode(FanProfile.self, from: Data(contentsOf: file))
+            } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                // Deleted between listing the directory and reading it — the user removed a
+                // profile mid-scan. Nothing is wrong and nothing is lost, so it isn't an error.
+                continue
             } catch {
                 TFLogger.shared.error("Skipped profile \(file.lastPathComponent): unreadable or not valid profile JSON (\(error))")
                 continue

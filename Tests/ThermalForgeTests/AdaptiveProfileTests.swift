@@ -124,10 +124,12 @@ struct AdaptiveProfileTests {
 
     // MARK: - Saved profiles
 
-    private var profilesDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThermalForge/profiles")
-    }
+    /// A fresh temp directory per test. Swift Testing builds a new suite instance for every
+    /// test and runs them in parallel, so pointing at the user's real profile folder let
+    /// fixtures from one test show up in another's scan — and logged every fixture's decode
+    /// failure to the user's real ~/Library/Logs/ThermalForge file.
+    private let profilesDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ThermalForgeTests-\(UUID().uuidString)", isDirectory: true)
 
     private func profile(id: String, stop: Float = 50, start: Float = 53, smoothing: Float = 10,
                          boost: Float = 0.1) -> FanProfile {
@@ -150,15 +152,11 @@ struct AdaptiveProfileTests {
     func loadAndResolve() throws {
         let good = profile(id: "test_adaptive_good")
         let bad = profile(id: "test_adaptive_bad", stop: 60, start: 53)
-        try good.save()
-        try bad.save()
-        defer {
-            for id in [good.id, bad.id] {
-                try? FileManager.default.removeItem(at: profilesDir.appendingPathComponent("\(id).json"))
-            }
-        }
+        try good.save(in: profilesDir)
+        try bad.save(in: profilesDir)
+        defer { try? FileManager.default.removeItem(at: profilesDir) }
 
-        let loaded = FanProfile.loadAll()
+        let loaded = FanProfile.loadAll(in: profilesDir)
         #expect(loaded.contains(good))
         #expect(!loaded.contains { $0.id == bad.id })
         #expect(FanProfile.selectable(id: good.id, among: loaded) == good)
@@ -169,14 +167,27 @@ struct AdaptiveProfileTests {
     func corruptFileSkipped() throws {
         let good = profile(id: "test_corrupt_neighbor")
         let corrupt = profilesDir.appendingPathComponent("test_corrupt.json")
-        try good.save()
+        try good.save(in: profilesDir)
         try Data("{ not json".utf8).write(to: corrupt)
-        defer {
-            try? FileManager.default.removeItem(at: corrupt)
-            try? FileManager.default.removeItem(at: profilesDir.appendingPathComponent("\(good.id).json"))
-        }
+        defer { try? FileManager.default.removeItem(at: profilesDir) }
 
-        #expect(FanProfile.loadAll().contains(good))
+        #expect(FanProfile.loadAll(in: profilesDir).contains(good))
+    }
+
+    @Test("A profile that disappears mid-scan is skipped, not reported as corrupt")
+    func vanishedFileSkipped() throws {
+        let good = profile(id: "test_vanished_neighbor")
+        try good.save(in: profilesDir)
+        // A dangling symlink is listed by contentsOfDirectory but fails the read with
+        // fileReadNoSuchFile — the same error as a profile deleted between the two steps,
+        // without having to win a race to produce it.
+        try FileManager.default.createSymbolicLink(
+            at: profilesDir.appendingPathComponent("test_vanished.json"),
+            withDestinationURL: profilesDir.appendingPathComponent("gone.json")
+        )
+        defer { try? FileManager.default.removeItem(at: profilesDir) }
+
+        #expect(FanProfile.loadAll(in: profilesDir).contains(good))
     }
 
     @Test("Profile JSON without adaptive settings still decodes")
