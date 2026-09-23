@@ -85,6 +85,8 @@ Add an optional `adaptive` block to get Smart's behavior with your own tuning:
 - `rateBoost` (0–1): extra fan speed per °C/sec of temperature rise (built-in Smart: 0.2).
 - `useCalibration`: use calibration data when it exists (built-in Smart: `true`).
 
+`Profiles/smart-mac-mini.json` is an example tuned on a Mac mini M4 (one fan, 1,000–4,900 RPM): the fan stays at its minimum through brief spikes instead of cycling off, and holds about 79°C under sustained all-core load at roughly two-thirds of built-in Smart's fan speed.
+
 Files with inconsistent values (e.g. `stopTemp` above `startTemp`) or the reserved id `smart` are skipped and logged. `Scripts/burst-test.sh <label>` runs a repeatable 10-minute load and summarizes temperature, RPM and fan surges, for comparing profiles.
 
 ## Install
