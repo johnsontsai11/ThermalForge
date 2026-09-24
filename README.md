@@ -11,6 +11,20 @@ Built in 2026 with Swift. No subscriptions, no telemetry, no ads.
 
 ---
 
+## Fork changes
+
+This fork ([johnsontsai11/ThermalForge](https://github.com/johnsontsai11/ThermalForge)) adds the following on top of [ProducerGuy/ThermalForge](https://github.com/ProducerGuy/ThermalForge):
+
+- **Custom Smart-style profiles:** JSON profiles with an optional `adaptive` block (smoothing, rate boost, calibration), chosen from a dropdown on the Smart button. Includes a tuned Mac mini M4 example. See [Custom profiles](#custom-profiles).
+- **Profile switching:** the fan keeps running when you switch profiles, and the monitor no longer reverts your selection.
+- **Safer readings:** implausible post-wake sensor values are ignored, Smart's safety override needs sustained heat, Silent leaves the fans to macOS on a hot reading, and calibration survives Tp0W jumps and saves for the sudo user.
+- **Lower CPU use:** a 200ms thermal tick (was 100ms), CPU/GPU-only sensor reads, no resends of an unchanged RPM, menu UI refreshes once a second and only while the menu is open, and a throttled post-spike process dump.
+- **Menu bar:** shows a 10 s average temperature at a fixed width.
+- **Logging:** each capture's `metadata.json` records the profile that produced it and whether that profile was in control. Launch logs the restored profile. Anomaly logs use median-filtered temperatures and real per-process CPU.
+- **Tooling:** `Scripts/burst-test.sh` runs a repeatable load to compare profiles.
+
+---
+
 ## Why ThermalForge?
 
 Tools like **Macs Fan Control** and **TG Pro** charge $15–$20 for fan control that hasn't fundamentally improved in years. Both require manual configuration, neither learns anything about your machine, and both have documented problems on Apple Silicon.
